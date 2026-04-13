@@ -19,23 +19,17 @@ BORDER  = "rgba(0,0,0,0.08)"
 GRID    = "rgba(0,0,0,0.06)"
 RED     = "#c0392b"
 NAVY    = "#0a2463"
+AVG_5Y_COLOR  = "#f39c12"   # amber  — 5-year average line
+AVG_10Y_COLOR = "#9b59b6"   # purple — 10-year average line
 
 ALL_YEAR_COLORS = {
-    "2026": RED,
-    "2025": INK,
-    "2024": "#2980b9",
-    "2023": "#27ae60",
-    "2022": "#8e44ad",
-    "2021": "#e67e22",
-    "2020": "#16a085",
-    "2019": "#d35400",
-    "2018": "#7f8c8d",
-    "2017": "#2c3e50",
-    "2016": "#a93226",
+    "2026": RED,        "2025": INK,        "2024": "#2980b9",
+    "2023": "#27ae60",  "2022": "#8e44ad",  "2021": "#e67e22",
+    "2020": "#16a085",  "2019": "#d35400",  "2018": "#7f8c8d",
+    "2017": "#2c3e50",  "2016": "#a93226",
     "Normal (Maxar)": INK_4,
 }
 
-# Brazil crop year: most recent first
 CROP_COLOR_PALETTE = [
     RED, INK, "#f1948a", "#82e0aa", INK_4,
     "#2980b9", "#e67e22", "#16a085", "#8e44ad", "#7f8c8d",
@@ -75,14 +69,10 @@ FILE_MAP = {
     "Vietnam":  "vietnam.parquet",
 }
 
-CALENDAR_YEARS = [
-    "2016", "2017", "2018", "2019", "2020",
-    "2021", "2022", "2023", "2024", "2025", "2026",
-    "Normal (Maxar)",
-]
+ALL_CAL_YEARS = [str(y) for y in range(2016, 2027)] + ["Normal (Maxar)"]
 
 # -------------------------------------------------------
-# DATA LOADING — DuckDB reads parquet files
+# DATA LOADING
 # -------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_origin_data(origin_name: str, parameter: str) -> pd.DataFrame:
@@ -90,26 +80,16 @@ def load_origin_data(origin_name: str, parameter: str) -> pd.DataFrame:
     if not parquet_path.exists():
         st.error(f"Parquet file missing for {origin_name}. Run backfill.py first.")
         return pd.DataFrame()
-
     path_str = str(parquet_path).replace("\\", "/")
-
     if parameter == "PRCP":
-        sql = f"""
-            SELECT station, region, year, date, prcp, prcp_sum
-            FROM read_parquet('{path_str}')
-            WHERE prcp IS NOT NULL OR prcp_sum IS NOT NULL
-        """
+        sql = f"SELECT station, region, year, date, prcp, prcp_sum FROM read_parquet('{path_str}') WHERE prcp IS NOT NULL OR prcp_sum IS NOT NULL"
     else:
-        sql = f"""
-            SELECT station, region, year, date, tavg
-            FROM read_parquet('{path_str}')
-            WHERE tavg IS NOT NULL
-        """
+        sql = f"SELECT station, region, year, date, tavg FROM read_parquet('{path_str}') WHERE tavg IS NOT NULL"
     return duckdb.query(sql).df()
 
 
 # -------------------------------------------------------
-# CALENDAR-YEAR PROCESSING  (Colombia / Honduras / Super4 / Vietnam)
+# PROCESSING — CALENDAR YEAR
 # -------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def process_precipitation(raw_df: pd.DataFrame, today: pd.Timestamp):
@@ -164,7 +144,6 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
         lambda r: pd.to_datetime(f"1950-{r['date']}") if r["year"] == "Normal (Maxar)" else r["full_date"],
         axis=1,
     )
-
     normals_df  = df[df["year"] == "Normal (Maxar)"].copy()
     normals_pre = normals_df.copy()
     normals_pre["rolling_date"] = normals_pre["rolling_date"].apply(
@@ -174,7 +153,6 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
     agg_normals = normals_ext.groupby(["region", "year", "rolling_date"], as_index=False).agg(
         prcp_avg=("prcp_avg", "mean"), prcp_sum_avg=("prcp_sum_avg", "mean")
     )
-
     n_parts = []
     for _, grp in agg_normals.groupby("region"):
         grp = grp.sort_values("rolling_date").copy()
@@ -185,7 +163,6 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
         lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
     )
     agg_normals_final = agg_normals[agg_normals["rolling_date"].dt.year != 1949].reset_index(drop=True)
-
     other_df  = df[df["year"] != "Normal (Maxar)"].copy()
     agg_other = other_df.groupby(["region", "year", "rolling_date"], as_index=False).agg(
         prcp_avg=("prcp_avg", "mean"), prcp_sum_avg=("prcp_sum_avg", "mean")
@@ -207,12 +184,11 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
 
 
 # -------------------------------------------------------
-# BRAZIL PROCESSING  (crop year Sep-Aug)
+# PROCESSING — BRAZIL
 # -------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
     df = raw_prcp[raw_prcp["date"] != "02-29"].copy().reset_index(drop=True)
-
     df_real    = df[df["year"] != "Normal (Maxar)"].copy()
     df_normals = df[df["year"] == "Normal (Maxar)"].copy()
 
@@ -234,21 +210,16 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
     df_real["tag"] = df_real["full_date"].apply(
         lambda d: "realized" if d <= today else "forecast"
     )
-
     real_daily = (
         df_real.groupby(["region", "crop_year", "xdate", "tag"], as_index=False)
         .agg(prcp_avg=("prcp", "mean"))
         .sort_values("xdate")
     )
-    real_daily["cumulative_prcp"] = (
-        real_daily.groupby(["region", "crop_year"])["prcp_avg"].cumsum()
-    )
-    # Keep crop years from 15/16 onwards (covers 10 years of data)
-    real_daily = real_daily[real_daily["crop_year"] >= "15/16"].copy()
+    real_daily["cumulative_prcp"] = real_daily.groupby(["region", "crop_year"])["prcp_avg"].cumsum()
+    # Start from 16/17 — 15/16 is excluded (incomplete picture)
+    real_daily = real_daily[real_daily["crop_year"] >= "16/17"].copy()
 
-    def _cy_end(cy):
-        return int(cy.split("/")[1])
-
+    def _cy_end(cy): return int(cy.split("/")[1])
     crop_years_sorted = sorted(real_daily["crop_year"].unique(), key=_cy_end)
     crop_year_colors  = {
         cy: CROP_COLOR_PALETTE[i] if i < len(CROP_COLOR_PALETTE) else INK_4
@@ -259,18 +230,14 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
     df_normals["day"]   = df_normals["date"].str[3:].astype(int)
     df_normals["xdate"] = df_normals.apply(
-        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]),
-        axis=1,
+        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]), axis=1,
     )
     normals_daily = (
         df_normals.groupby(["region", "xdate"], as_index=False)
         .agg(prcp_avg=("prcp", "mean"))
         .sort_values("xdate")
     )
-    normals_daily["cumulative_prcp"] = (
-        normals_daily.groupby("region")["prcp_avg"].cumsum()
-    )
-
+    normals_daily["cumulative_prcp"] = normals_daily.groupby("region")["prcp_avg"].cumsum()
     return real_daily, normals_daily, crop_years_sorted, crop_year_colors, latest_crop_year
 
 
@@ -298,19 +265,17 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
     df_real["tag"] = df_real["full_date"].apply(
         lambda d: "realized" if d <= today else "forecast"
     )
-
     real_daily = (
         df_real.groupby(["region", "crop_year", "xdate", "tag"], as_index=False)
         .agg(tavg_avg=("tavg", "mean"))
         .sort_values("xdate")
     )
-    real_daily = real_daily[real_daily["crop_year"] >= "15/16"].copy()
+    real_daily = real_daily[real_daily["crop_year"] >= "16/17"].copy()
 
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
     df_normals["day"]   = df_normals["date"].str[3:].astype(int)
     df_normals["xdate"] = df_normals.apply(
-        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]),
-        axis=1,
+        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]), axis=1,
     )
     normals_daily = (
         df_normals.groupby(["region", "xdate"], as_index=False)
@@ -322,25 +287,90 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
 
 @st.cache_data(show_spinner=False)
 def process_brazil_rolling(real_daily: pd.DataFrame, normals_daily: pd.DataFrame):
-    real = (
-        real_daily.groupby(["region", "crop_year", "xdate"], as_index=False)
-        .agg(prcp_avg=("prcp_avg", "mean"))
-    )
+    real = real_daily.groupby(["region", "crop_year", "xdate"], as_index=False).agg(prcp_avg=("prcp_avg", "mean"))
     parts = []
     for _, grp in real.groupby(["region", "crop_year"]):
         grp = grp.sort_values("xdate").copy()
         grp["prcp_30d"] = grp.rolling("30D", on="xdate", min_periods=1)["prcp_avg"].sum()
         parts.append(grp)
     real_rolled = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=list(real.columns) + ["prcp_30d"])
-
     nparts = []
     for _, grp in normals_daily.groupby("region"):
         grp = grp.sort_values("xdate").copy()
         grp["prcp_30d"] = grp.rolling("30D", on="xdate", min_periods=1)["prcp_avg"].sum()
         nparts.append(grp)
     normals_rolled = pd.concat(nparts, ignore_index=True) if nparts else pd.DataFrame(columns=list(normals_daily.columns) + ["prcp_30d"])
-
     return real_rolled, normals_rolled
+
+
+# -------------------------------------------------------
+# AVERAGE LINE COMPUTATION
+# -------------------------------------------------------
+def compute_brazil_precip_avg(real_daily: pd.DataFrame, n: int, crop_years_sorted: list):
+    avg_cys = crop_years_sorted[-n:] if len(crop_years_sorted) >= n else crop_years_sorted
+    avg_df  = (
+        real_daily[real_daily["crop_year"].isin(avg_cys)]
+        .groupby(["region", "xdate"], as_index=False)
+        .agg(prcp_avg=("prcp_avg", "mean"))
+        .sort_values("xdate")
+    )
+    avg_df["cumulative_prcp"] = avg_df.groupby("region")["prcp_avg"].cumsum()
+    return avg_df
+
+
+def compute_brazil_rolling_avg(real_rolled: pd.DataFrame, n: int, crop_years_sorted: list):
+    avg_cys = crop_years_sorted[-n:] if len(crop_years_sorted) >= n else crop_years_sorted
+    avg_df  = (
+        real_rolled[real_rolled["crop_year"].isin(avg_cys)]
+        .groupby(["region", "xdate"], as_index=False)
+        .agg(prcp_30d=("prcp_30d", "mean"))
+    )
+    return avg_df
+
+
+def compute_brazil_temp_avg(real_daily_temp: pd.DataFrame, n: int, crop_years_sorted: list):
+    avg_cys = crop_years_sorted[-n:] if len(crop_years_sorted) >= n else crop_years_sorted
+    avg_df  = (
+        real_daily_temp[real_daily_temp["crop_year"].isin(avg_cys)]
+        .groupby(["region", "xdate"], as_index=False)
+        .agg(tavg_avg=("tavg_avg", "mean"))
+    )
+    return avg_df
+
+
+def compute_cal_precip_avg(daily_avg_full: pd.DataFrame, n: int):
+    real_years = sorted([y for y in daily_avg_full["year"].unique() if y != "Normal (Maxar)"])
+    avg_years  = real_years[-n:] if len(real_years) >= n else real_years
+    avg_df = (
+        daily_avg_full[daily_avg_full["year"].isin(avg_years)]
+        .groupby(["region", "date"], as_index=False)
+        .agg(prcp_sum_avg=("prcp_sum_avg", "mean"), prcp_avg=("prcp_avg", "mean"))
+    )
+    avg_df["_px"] = pd.to_datetime("2001-" + avg_df["date"])
+    return avg_df
+
+
+def compute_cal_rolling_avg(agg_df_full: pd.DataFrame, n: int):
+    real_years = sorted([y for y in agg_df_full["year"].unique() if y != "Normal (Maxar)"])
+    avg_years  = real_years[-n:] if len(real_years) >= n else real_years
+    avg_df = (
+        agg_df_full[agg_df_full["year"].isin(avg_years)]
+        .groupby(["region", "xdate"], as_index=False)
+        .agg(prcp_avg_30d_sum=("prcp_avg_30d_sum", "mean"))
+    )
+    return avg_df
+
+
+def compute_cal_temp_avg(daily_avg_temp_full: pd.DataFrame, n: int):
+    real_years = sorted([y for y in daily_avg_temp_full["year"].unique() if y != "Normal (Maxar)"])
+    avg_years  = real_years[-n:] if len(real_years) >= n else real_years
+    avg_df = (
+        daily_avg_temp_full[daily_avg_temp_full["year"].isin(avg_years)]
+        .groupby(["region", "date"], as_index=False)
+        .agg(tavg_avg=("tavg_avg", "mean"))
+    )
+    avg_df["_px"] = pd.to_datetime("2001-" + avg_df["date"])
+    return avg_df
 
 
 # -------------------------------------------------------
@@ -366,19 +396,25 @@ def _base_layout(title: str, y_title: str, height: int = 420) -> dict:
         margin=dict(l=60, r=20, t=50, b=55),
     )
 
-
 _DT_XAXIS_CAL = dict(
     tickformat="%b", dtick="M1", tick0="2001-01-01",
     range=["2001-01-01", "2001-12-31"],
     gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
     linecolor=BORDER, zerolinecolor=BORDER,
 )
-
 _DT_XAXIS_BRAZIL = dict(
     tickformat="%b", dtick="M1", tick0="2000-09-01",
     range=["2000-09-01", "2001-08-31"],
     gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
     linecolor=BORDER, zerolinecolor=BORDER,
+)
+
+_BOX_EXPLANATION = (
+    "<p style='font-size:.71rem;color:#6e6e73;font-style:italic;margin-top:.3rem'>"
+    "<b>Reading the box:</b> The box spans Q1–Q3 (middle 50% of monthly totals across all crop years). "
+    "The line inside is the median. Whiskers extend to 1.5× the interquartile range. "
+    "<b>Dots</b> are outlier years that fall outside the whiskers — unusually wet or dry months."
+    "</p>"
 )
 
 
@@ -389,7 +425,6 @@ def _add_year_traces(fig, df_year, year, y_col, hover_unit, year_colors):
     df_all   = df_all.sort_values("_px")
     realized = df_all[df_all["tag"] == "realized"]
     forecast = df_all[df_all["tag"] == "forecast"]
-
     if not realized.empty:
         fig.add_trace(go.Scatter(
             x=realized["_px"], y=realized[y_col],
@@ -411,46 +446,60 @@ def _add_year_traces(fig, df_year, year, y_col, hover_unit, year_colors):
 # -------------------------------------------------------
 # CALENDAR-YEAR CHART BUILDERS
 # -------------------------------------------------------
-def build_cumulative_precip(daily_avg, region, year_colors):
+def build_cumulative_precip(daily_avg, region, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = daily_avg[daily_avg["region"] == region].copy()
     fig  = go.Figure()
     for year in sorted(df_r["year"].unique()):
         _add_year_traces(fig, df_r[df_r["year"] == year], year, "prcp_sum_avg", "mm", year_colors)
+    if avg_df is not None:
+        d = avg_df[avg_df["region"] == region].sort_values("_px")
+        if not d.empty:
+            fig.add_trace(go.Scatter(
+                x=d["_px"], y=d["prcp_sum_avg"], mode="lines", name=avg_label,
+                line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
+                hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
+            ))
     layout = _base_layout(f"Cumulative Precipitation  —  {region}", "mm")
     layout["xaxis"] = _DT_XAXIS_CAL.copy()
     fig.update_layout(**layout)
     return fig
 
 
-def build_temperature(daily_avg_temp, region, year_colors):
+def build_temperature(daily_avg_temp, region, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r      = daily_avg_temp[daily_avg_temp["region"] == region].copy()
     real_years = [y for y in df_r["year"].unique() if y != "Normal (Maxar)"]
-    df_minmax = (
+    df_minmax  = (
         df_r[df_r["year"].isin(real_years)]
         .groupby("date", as_index=False)
         .agg(tavg_min=("tavg_avg", "min"), tavg_max=("tavg_avg", "max"))
     )
     df_minmax["_px"] = pd.to_datetime("2001-" + df_minmax["date"])
     df_minmax = df_minmax.sort_values("_px")
-
     fig = go.Figure()
     if not df_minmax.empty:
         fig.add_trace(go.Scatter(
             x=list(df_minmax["_px"]) + list(df_minmax["_px"])[::-1],
             y=list(df_minmax["tavg_max"]) + list(df_minmax["tavg_min"])[::-1],
             fill="toself", fillcolor="rgba(0,0,0,0.05)",
-            line=dict(color="rgba(0,0,0,0)"),
-            name="Hist. Range", hoverinfo="skip",
+            line=dict(color="rgba(0,0,0,0)"), name="Hist. Range", hoverinfo="skip",
         ))
     for year in sorted(df_r["year"].unique()):
         _add_year_traces(fig, df_r[df_r["year"] == year], year, "tavg_avg", "°C", year_colors)
+    if avg_df is not None:
+        d = avg_df[avg_df["region"] == region].sort_values("_px")
+        if not d.empty:
+            fig.add_trace(go.Scatter(
+                x=d["_px"], y=d["tavg_avg"], mode="lines", name=avg_label,
+                line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
+                hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>",
+            ))
     layout = _base_layout(f"Average Temperature  —  {region}", "°C")
     layout["xaxis"] = _DT_XAXIS_CAL.copy()
     fig.update_layout(**layout)
     return fig
 
 
-def build_rolling_precip(agg_df, region, today, year_colors):
+def build_rolling_precip(agg_df, region, today, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     latest_yr = str(agg_df[agg_df["year"] != "Normal (Maxar)"]["year"].astype(str).max())
     df_r = agg_df[agg_df["region"] == region].copy()
     df_r = df_r[~((df_r["year"] == latest_yr) & (df_r["xdate"] > today))]
@@ -458,12 +507,18 @@ def build_rolling_precip(agg_df, region, today, year_colors):
     for year in sorted(df_r["year"].unique()):
         df_y = df_r[df_r["year"] == year].sort_values("xdate")
         fig.add_trace(go.Scatter(
-            x=df_y["xdate"], y=df_y["prcp_avg_30d_sum"],
-            mode="lines", name=str(year),
-            line=dict(color=year_colors.get(str(year), INK_4), width=2),
-            connectgaps=True,
+            x=df_y["xdate"], y=df_y["prcp_avg_30d_sum"], mode="lines", name=str(year),
+            line=dict(color=year_colors.get(str(year), INK_4), width=2), connectgaps=True,
             hovertemplate=f"<b>{year}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
         ))
+    if avg_df is not None:
+        d = avg_df[avg_df["region"] == region].sort_values("xdate")
+        if not d.empty:
+            fig.add_trace(go.Scatter(
+                x=d["xdate"], y=d["prcp_avg_30d_sum"], mode="lines", name=avg_label,
+                line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
+                hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
+            ))
     layout = _base_layout(f"30-Day Rolling Precipitation  —  {region}", "Rolling Sum (mm)")
     layout["xaxis"].update(tickformat="%b", dtick="M1")
     fig.update_layout(**layout)
@@ -471,56 +526,49 @@ def build_rolling_precip(agg_df, region, today, year_colors):
 
 
 # -------------------------------------------------------
-# BRAZIL CHART BUILDERS  (crop year, Sep-Aug x-axis)
+# BRAZIL CHART BUILDERS
 # -------------------------------------------------------
-def build_brazil_cumulative(real_daily, normals_daily, region,
-                             crop_years_sorted, crop_year_colors,
-                             latest_crop_year, selected_crop_years):
+def build_brazil_cumulative(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors,
+                             latest_crop_year, selected_crop_years, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = real_daily[real_daily["region"] == region].copy()
     df_n = normals_daily[normals_daily["region"] == region].sort_values("xdate")
     fig  = go.Figure()
-
     for cy in crop_years_sorted:
         if cy not in selected_crop_years:
             continue
         color = crop_year_colors.get(cy, INK_4)
         cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
-
         if cy == latest_crop_year:
             realized = cy_df[cy_df["tag"] == "realized"]
             forecast = cy_df[cy_df["tag"] == "forecast"]
             if not realized.empty:
-                fig.add_trace(go.Scatter(
-                    x=realized["xdate"], y=realized["cumulative_prcp"],
+                fig.add_trace(go.Scatter(x=realized["xdate"], y=realized["cumulative_prcp"],
                     mode="lines", name=cy, legendgroup=cy, showlegend=True,
                     line=dict(color=color, width=2, dash="solid"), connectgaps=True,
-                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
-                ))
+                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
             if not forecast.empty:
                 if not realized.empty:
                     forecast = pd.concat([realized.iloc[[-1]], forecast], ignore_index=True)
-                fig.add_trace(go.Scatter(
-                    x=forecast["xdate"], y=forecast["cumulative_prcp"],
+                fig.add_trace(go.Scatter(x=forecast["xdate"], y=forecast["cumulative_prcp"],
                     mode="lines", name=f"{cy} fcst", legendgroup=cy, showlegend=True,
                     line=dict(color=color, width=2, dash="dot"), connectgaps=True,
-                    hovertemplate=f"<b>{cy} fcst</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
-                ))
+                    hovertemplate=f"<b>{cy} fcst</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
         else:
-            fig.add_trace(go.Scatter(
-                x=cy_df["xdate"], y=cy_df["cumulative_prcp"],
-                mode="lines", name=cy,
-                line=dict(color=color, width=2, dash="solid"), connectgaps=True,
-                hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
-            ))
-
+            fig.add_trace(go.Scatter(x=cy_df["xdate"], y=cy_df["cumulative_prcp"],
+                mode="lines", name=cy, line=dict(color=color, width=2), connectgaps=True,
+                hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
     if not df_n.empty:
-        fig.add_trace(go.Scatter(
-            x=df_n["xdate"], y=df_n["cumulative_prcp"],
+        fig.add_trace(go.Scatter(x=df_n["xdate"], y=df_n["cumulative_prcp"],
             mode="lines", name="Normal (Maxar)",
             line=dict(color=INK_4, width=2.5, dash="dash"), connectgaps=True,
-            hovertemplate="<b>Normal (Maxar)</b>  %{x|%b %d}  %{y:.1f} mm<extra></extra>",
-        ))
-
+            hovertemplate="<b>Normal (Maxar)</b>  %{x|%b %d}  %{y:.1f} mm<extra></extra>"))
+    if avg_df is not None:
+        d = avg_df[avg_df["region"] == region].sort_values("xdate")
+        if not d.empty:
+            fig.add_trace(go.Scatter(x=d["xdate"], y=d["cumulative_prcp"],
+                mode="lines", name=avg_label,
+                line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
+                hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
     layout = _base_layout(f"Cumulative Precipitation — Crop Year  ({region})", "mm")
     layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
     layout["legend"]["title"]["text"] = "Crop Year"
@@ -528,55 +576,48 @@ def build_brazil_cumulative(real_daily, normals_daily, region,
     return fig
 
 
-def build_brazil_temperature(real_daily_temp, normals_daily_temp, region,
-                              crop_years_sorted, crop_year_colors,
-                              latest_crop_year, selected_crop_years):
+def build_brazil_temperature(real_daily_temp, normals_daily_temp, region, crop_years_sorted, crop_year_colors,
+                              latest_crop_year, selected_crop_years, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
     df_n = normals_daily_temp[normals_daily_temp["region"] == region].sort_values("xdate")
     fig  = go.Figure()
-
     for cy in crop_years_sorted:
         if cy not in selected_crop_years:
             continue
         color = crop_year_colors.get(cy, INK_4)
         cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
-
         if cy == latest_crop_year:
             realized = cy_df[cy_df["tag"] == "realized"]
             forecast = cy_df[cy_df["tag"] == "forecast"]
             if not realized.empty:
-                fig.add_trace(go.Scatter(
-                    x=realized["xdate"], y=realized["tavg_avg"],
+                fig.add_trace(go.Scatter(x=realized["xdate"], y=realized["tavg_avg"],
                     mode="lines", name=cy, legendgroup=cy, showlegend=True,
                     line=dict(color=color, width=2, dash="solid"), connectgaps=True,
-                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} °C<extra></extra>",
-                ))
+                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>"))
             if not forecast.empty:
                 if not realized.empty:
                     forecast = pd.concat([realized.iloc[[-1]], forecast], ignore_index=True)
-                fig.add_trace(go.Scatter(
-                    x=forecast["xdate"], y=forecast["tavg_avg"],
+                fig.add_trace(go.Scatter(x=forecast["xdate"], y=forecast["tavg_avg"],
                     mode="lines", name=f"{cy} fcst", legendgroup=cy, showlegend=True,
                     line=dict(color=color, width=2, dash="dot"), connectgaps=True,
-                    hovertemplate=f"<b>{cy} fcst</b>  %{{x|%b %d}}  %{{y:.1f}} °C<extra></extra>",
-                ))
+                    hovertemplate=f"<b>{cy} fcst</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>"))
         else:
             if not cy_df.empty:
-                fig.add_trace(go.Scatter(
-                    x=cy_df["xdate"], y=cy_df["tavg_avg"],
-                    mode="lines", name=cy,
-                    line=dict(color=color, width=2, dash="solid"), connectgaps=True,
-                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} °C<extra></extra>",
-                ))
-
+                fig.add_trace(go.Scatter(x=cy_df["xdate"], y=cy_df["tavg_avg"],
+                    mode="lines", name=cy, line=dict(color=color, width=2), connectgaps=True,
+                    hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>"))
     if not df_n.empty:
-        fig.add_trace(go.Scatter(
-            x=df_n["xdate"], y=df_n["tavg_avg"],
+        fig.add_trace(go.Scatter(x=df_n["xdate"], y=df_n["tavg_avg"],
             mode="lines", name="Normal (Maxar)",
             line=dict(color=INK_4, width=2.5, dash="dash"), connectgaps=True,
-            hovertemplate="<b>Normal (Maxar)</b>  %{x|%b %d}  %{y:.1f} °C<extra></extra>",
-        ))
-
+            hovertemplate="<b>Normal (Maxar)</b>  %{x|%b %d}  %{y:.1f} C<extra></extra>"))
+    if avg_df is not None:
+        d = avg_df[avg_df["region"] == region].sort_values("xdate")
+        if not d.empty:
+            fig.add_trace(go.Scatter(x=d["xdate"], y=d["tavg_avg"],
+                mode="lines", name=avg_label,
+                line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
+                hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>"))
     layout = _base_layout(f"Average Temperature — Crop Year  ({region})", "°C")
     layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
     layout["legend"]["title"]["text"] = "Crop Year"
@@ -584,33 +625,32 @@ def build_brazil_temperature(real_daily_temp, normals_daily_temp, region,
     return fig
 
 
-def build_brazil_rolling(real_rolled, normals_rolled, region,
-                          crop_years_sorted, crop_year_colors, selected_crop_years):
+def build_brazil_rolling(real_rolled, normals_rolled, region, crop_years_sorted, crop_year_colors,
+                          selected_crop_years, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = real_rolled[real_rolled["region"] == region].copy()
     df_n = normals_rolled[normals_rolled["region"] == region].sort_values("xdate")
     fig  = go.Figure()
-
     for cy in crop_years_sorted:
         if cy not in selected_crop_years:
             continue
-        color = crop_year_colors.get(cy, INK_4)
         cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
         if not cy_df.empty:
-            fig.add_trace(go.Scatter(
-                x=cy_df["xdate"], y=cy_df["prcp_30d"],
+            fig.add_trace(go.Scatter(x=cy_df["xdate"], y=cy_df["prcp_30d"],
                 mode="lines", name=cy,
-                line=dict(color=color, width=2), connectgaps=True,
-                hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
-            ))
-
+                line=dict(color=crop_year_colors.get(cy, INK_4), width=2), connectgaps=True,
+                hovertemplate=f"<b>{cy}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
     if not df_n.empty:
-        fig.add_trace(go.Scatter(
-            x=df_n["xdate"], y=df_n["prcp_30d"],
+        fig.add_trace(go.Scatter(x=df_n["xdate"], y=df_n["prcp_30d"],
             mode="lines", name="Normal (Maxar)",
             line=dict(color=INK_4, width=2.5, dash="dash"), connectgaps=True,
-            hovertemplate="<b>Normal (Maxar)</b>  %{x|%b %d}  %{y:.1f} mm<extra></extra>",
-        ))
-
+            hovertemplate="<b>Normal (Maxar)</b>  %{x|%b %d}  %{y:.1f} mm<extra></extra>"))
+    if avg_df is not None:
+        d = avg_df[avg_df["region"] == region].sort_values("xdate")
+        if not d.empty:
+            fig.add_trace(go.Scatter(x=d["xdate"], y=d["prcp_30d"],
+                mode="lines", name=avg_label,
+                line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
+                hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
     layout = _base_layout(f"30-Day Rolling Precipitation — Crop Year  ({region})", "Rolling Sum (mm)")
     layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
     layout["legend"]["title"]["text"] = "Crop Year"
@@ -619,7 +659,7 @@ def build_brazil_rolling(real_rolled, normals_rolled, region,
 
 
 # -------------------------------------------------------
-# ADVANCED ANALYTICS
+# ADVANCED ANALYTICS — SHARED
 # -------------------------------------------------------
 _BRAZIL_MONTH_ORDER  = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8]
 _MONTH_LABELS        = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
@@ -628,15 +668,17 @@ _BRAZIL_MONTH_LABELS = [_MONTH_LABELS[m] for m in _BRAZIL_MONTH_ORDER]
 _CAL_MONTH_LABELS    = [_MONTH_LABELS[m] for m in range(1, 13)]
 
 
-def build_brazil_precip_anomaly(real_daily, normals_daily, region,
-                                 crop_years_sorted, crop_year_colors, selected_crop_years):
+# -------------------------------------------------------
+# ADVANCED ANALYTICS — BRAZIL
+# -------------------------------------------------------
+def build_brazil_precip_anomaly(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years):
     df_r = real_daily[real_daily["region"] == region].copy()
     df_n = normals_daily[normals_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
     df_n["month"] = df_n["xdate"].dt.month
     normals_m = df_n.groupby("month")["prcp_avg"].sum().reset_index().rename(columns={"prcp_avg": "normal_sum"})
     real_m    = df_r.groupby(["crop_year", "month"])["prcp_avg"].sum().reset_index().rename(columns={"prcp_avg": "real_sum"})
-    merged = real_m.merge(normals_m, on="month")
+    merged    = real_m.merge(normals_m, on="month")
     merged["anomaly"]     = merged["real_sum"] - merged["normal_sum"]
     merged["month_label"] = merged["month"].map(_MONTH_LABELS)
     merged["month_order"] = merged["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
@@ -648,11 +690,9 @@ def build_brazil_precip_anomaly(real_daily, normals_daily, region,
         cy_df = merged[merged["crop_year"] == cy]
         if cy_df.empty:
             continue
-        fig.add_trace(go.Bar(
-            x=cy_df["month_label"], y=cy_df["anomaly"], name=cy,
+        fig.add_trace(go.Bar(x=cy_df["month_label"], y=cy_df["anomaly"], name=cy,
             marker_color=crop_year_colors.get(cy, INK_4), opacity=0.85,
-            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y:+.1f}} mm<extra></extra>",
-        ))
+            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y:+.1f}} mm<extra></extra>"))
     fig.add_hline(y=0, line_color=INK_3, line_width=1)
     layout = _base_layout(f"Monthly Precipitation Anomaly vs Normal (Maxar) ({region})", "mm above/below normal")
     layout["barmode"] = "group"
@@ -663,8 +703,7 @@ def build_brazil_precip_anomaly(real_daily, normals_daily, region,
     return fig
 
 
-def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_colors,
-                           selected_crop_years, threshold=1.0):
+def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=1.0):
     df_r = real_daily[real_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
     results = []
@@ -694,12 +733,10 @@ def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_color
         cy_df = res[res["crop_year"] == cy]
         if cy_df.empty:
             continue
-        fig.add_trace(go.Bar(
-            x=cy_df["month_label"], y=cy_df["max_dry_days"], name=cy,
+        fig.add_trace(go.Bar(x=cy_df["month_label"], y=cy_df["max_dry_days"], name=cy,
             marker_color=crop_year_colors.get(cy, INK_4), opacity=0.85,
-            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>",
-        ))
-    layout = _base_layout(f"Max Consecutive Dry Days per Month ({region}, <{threshold}mm/day)", "Days")
+            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Max Consecutive Dry Days ({region}, <{threshold} mm/day)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
@@ -708,8 +745,49 @@ def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_color
     return fig
 
 
-def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_year_colors,
-                              selected_crop_years, threshold=28.0):
+def build_brazil_wet_days(real_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=1.0):
+    df_r = real_daily[real_daily["region"] == region].copy()
+    df_r["month"] = df_r["xdate"].dt.month
+    results = []
+    for cy in crop_years_sorted:
+        if cy not in selected_crop_years:
+            continue
+        cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
+        for month in _BRAZIL_MONTH_ORDER:
+            m_df = cy_df[cy_df["month"] == month]
+            if m_df.empty:
+                continue
+            max_run = curr = 0
+            for v in (m_df["prcp_avg"] >= threshold):
+                curr = curr + 1 if v else 0
+                max_run = max(max_run, curr)
+            results.append({"crop_year": cy, "month": month, "max_wet_days": max_run})
+    if not results:
+        return go.Figure()
+    res = pd.DataFrame(results)
+    res["month_label"] = res["month"].map(_MONTH_LABELS)
+    res["month_order"] = res["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
+    res = res.sort_values("month_order")
+    fig = go.Figure()
+    for cy in crop_years_sorted:
+        if cy not in selected_crop_years:
+            continue
+        cy_df = res[res["crop_year"] == cy]
+        if cy_df.empty:
+            continue
+        fig.add_trace(go.Bar(x=cy_df["month_label"], y=cy_df["max_wet_days"], name=cy,
+            marker_color=crop_year_colors.get(cy, INK_4), opacity=0.85,
+            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Max Consecutive Wet Days ({region}, >={threshold} mm/day)", "Days")
+    layout["barmode"] = "group"
+    layout["xaxis"]["categoryorder"] = "array"
+    layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
+    layout["legend"]["title"]["text"] = "Crop Year"
+    fig.update_layout(**layout)
+    return fig
+
+
+def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=28.0):
     if real_daily_temp.empty:
         return go.Figure()
     df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
@@ -738,12 +816,10 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
         cy_df = res[res["crop_year"] == cy]
         if cy_df.empty:
             continue
-        fig.add_trace(go.Bar(
-            x=cy_df["month_label"], y=cy_df["stress_days"], name=cy,
+        fig.add_trace(go.Bar(x=cy_df["month_label"], y=cy_df["stress_days"], name=cy,
             marker_color=crop_year_colors.get(cy, INK_4), opacity=0.85,
-            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>",
-        ))
-    layout = _base_layout(f"Heat Stress Days per Month ({region}, >{threshold}°C avg)", "Days")
+            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C avg)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
@@ -752,8 +828,7 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
     return fig
 
 
-def build_brazil_monthly_boxplot(real_daily, normals_daily, region,
-                                  crop_years_sorted, crop_year_colors, latest_crop_year):
+def build_brazil_monthly_boxplot(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors, latest_crop_year):
     df_r = real_daily[real_daily["region"] == region].copy()
     df_n = normals_daily[normals_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
@@ -767,27 +842,20 @@ def build_brazil_monthly_boxplot(real_daily, normals_daily, region,
     monthly   = monthly.sort_values("month_order")
     normals_m = normals_m.sort_values("month_order")
     fig = go.Figure()
-    fig.add_trace(go.Box(
-        x=monthly["month_label"], y=monthly["prcp_avg"],
+    fig.add_trace(go.Box(x=monthly["month_label"], y=monthly["prcp_avg"],
         name="Historical range", marker_color=INK_4,
         fillcolor="rgba(174,174,178,0.25)", line_color=INK_4,
-        boxpoints="outliers", whiskerwidth=0.5,
-    ))
+        boxpoints="outliers", whiskerwidth=0.5))
     if latest_crop_year:
         curr = monthly[monthly["crop_year"] == latest_crop_year]
-        fig.add_trace(go.Scatter(
-            x=curr["month_label"], y=curr["prcp_avg"],
+        fig.add_trace(go.Scatter(x=curr["month_label"], y=curr["prcp_avg"],
             mode="markers+lines", name=latest_crop_year,
-            marker=dict(color=RED, size=8, symbol="circle"),
-            line=dict(color=RED, width=2),
-            hovertemplate=f"<b>{latest_crop_year}</b>  %{{x}}  %{{y:.1f}} mm<extra></extra>",
-        ))
-    fig.add_trace(go.Scatter(
-        x=normals_m["month_label"], y=normals_m["prcp_avg"],
+            marker=dict(color=RED, size=8), line=dict(color=RED, width=2),
+            hovertemplate=f"<b>{latest_crop_year}</b>  %{{x}}  %{{y:.1f}} mm<extra></extra>"))
+    fig.add_trace(go.Scatter(x=normals_m["month_label"], y=normals_m["prcp_avg"],
         mode="lines", name="Normal (Maxar)",
         line=dict(color=INK_4, width=2, dash="dash"),
-        hovertemplate="<b>Normal (Maxar)</b>  %{x}  %{y:.1f} mm<extra></extra>",
-    ))
+        hovertemplate="<b>Normal (Maxar)</b>  %{x}  %{y:.1f} mm<extra></extra>"))
     layout = _base_layout(f"Monthly Precipitation Distribution ({region})", "mm")
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
@@ -796,46 +864,8 @@ def build_brazil_monthly_boxplot(real_daily, normals_daily, region,
     return fig
 
 
-def build_brazil_ytd_vs_normals(real_daily, normals_daily, region,
-                                  crop_years_sorted, crop_year_colors,
-                                  selected_crop_years, today):
-    df_r = real_daily[real_daily["region"] == region].copy()
-    df_n = normals_daily[normals_daily["region"] == region].copy()
-    today_xdate = pd.Timestamp(2000 if today.month >= 9 else 2001, today.month, today.day)
-    ytd_normal  = df_n[df_n["xdate"] <= today_xdate]["prcp_avg"].sum()
-    if ytd_normal == 0:
-        return go.Figure()
-    results = []
-    for cy in crop_years_sorted:
-        if cy not in selected_crop_years:
-            continue
-        cy_df  = df_r[(df_r["crop_year"] == cy) & (df_r["xdate"] <= today_xdate)]
-        actual = cy_df["prcp_avg"].sum()
-        results.append({"crop_year": cy, "pct": actual / ytd_normal * 100, "actual": actual})
-    if not results:
-        return go.Figure()
-    res = pd.DataFrame(results)
-    colors = [crop_year_colors.get(r, INK_4) for r in res["crop_year"]]
-    fig = go.Figure(go.Bar(
-        x=res["pct"], y=res["crop_year"], orientation="h",
-        marker_color=colors,
-        text=[f"{p:.0f}%  ({a:.0f} mm)" for p, a in zip(res["pct"], res["actual"])],
-        textposition="outside",
-        hovertemplate="<b>%{y}</b>  %{x:.1f}% of normal<extra></extra>",
-    ))
-    fig.add_vline(x=100, line_color=INK_3, line_width=1.5, line_dash="dash")
-    layout = _base_layout(
-        f"YTD Precip vs Normal (Maxar) — to {today.strftime('%b %d')} ({region})", "% of Normal")
-    layout["xaxis"]["ticksuffix"] = "%"
-    layout["xaxis"]["range"] = [0, max(res["pct"].max() * 1.25, 150)]
-    layout["showlegend"] = False
-    layout["height"] = max(260, 70 * len(results))
-    fig.update_layout(**layout)
-    return fig
-
-
 # -------------------------------------------------------
-# CALENDAR-YEAR ADVANCED ANALYTICS
+# ADVANCED ANALYTICS — CALENDAR YEAR
 # -------------------------------------------------------
 def build_precip_anomaly(daily_avg, region, selected_years):
     df = daily_avg[daily_avg["region"] == region].copy()
@@ -855,11 +885,9 @@ def build_precip_anomaly(daily_avg, region, selected_years):
         y_df = merged[merged["year"] == year]
         if y_df.empty:
             continue
-        fig.add_trace(go.Bar(
-            x=y_df["month_label"], y=y_df["anomaly"], name=year,
+        fig.add_trace(go.Bar(x=y_df["month_label"], y=y_df["anomaly"], name=year,
             marker_color=ALL_YEAR_COLORS.get(year, INK_4), opacity=0.85,
-            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y:+.1f}} mm<extra></extra>",
-        ))
+            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y:+.1f}} mm<extra></extra>"))
     fig.add_hline(y=0, line_color=INK_3, line_width=1)
     layout = _base_layout(f"Monthly Precipitation Anomaly vs Normal (Maxar) ({region})", "mm above/below normal")
     layout["barmode"] = "group"
@@ -899,12 +927,51 @@ def build_dry_days(daily_avg, region, selected_years, threshold=1.0):
         y_df = res[res["year"] == year]
         if y_df.empty:
             continue
-        fig.add_trace(go.Bar(
-            x=y_df["month_label"], y=y_df["max_dry_days"], name=year,
+        fig.add_trace(go.Bar(x=y_df["month_label"], y=y_df["max_dry_days"], name=year,
             marker_color=ALL_YEAR_COLORS.get(year, INK_4), opacity=0.85,
-            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>",
-        ))
-    layout = _base_layout(f"Max Consecutive Dry Days per Month ({region}, <{threshold}mm/day)", "Days")
+            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Max Consecutive Dry Days ({region}, <{threshold} mm/day)", "Days")
+    layout["barmode"] = "group"
+    layout["xaxis"]["categoryorder"] = "array"
+    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["legend"]["title"]["text"] = "Year"
+    fig.update_layout(**layout)
+    return fig
+
+
+def build_wet_days(daily_avg, region, selected_years, threshold=1.0):
+    df = daily_avg[(daily_avg["region"] == region) & (daily_avg["year"] != "Normal (Maxar)")].copy()
+    df["month"] = df["full_date"].dt.month
+    results = []
+    for year in selected_years:
+        if year == "Normal (Maxar)":
+            continue
+        y_df = df[df["year"] == year].sort_values("full_date")
+        for month in range(1, 13):
+            m_df = y_df[y_df["month"] == month]
+            if m_df.empty:
+                continue
+            max_run = curr = 0
+            for v in (m_df["prcp_avg"] >= threshold):
+                curr = curr + 1 if v else 0
+                max_run = max(max_run, curr)
+            results.append({"year": year, "month": month, "max_wet_days": max_run})
+    if not results:
+        return go.Figure()
+    res = pd.DataFrame(results)
+    res["month_label"] = res["month"].map(_MONTH_LABELS)
+    res = res.sort_values("month")
+    fig = go.Figure()
+    for year in selected_years:
+        if year == "Normal (Maxar)":
+            continue
+        y_df = res[res["year"] == year]
+        if y_df.empty:
+            continue
+        fig.add_trace(go.Bar(x=y_df["month_label"], y=y_df["max_wet_days"], name=year,
+            marker_color=ALL_YEAR_COLORS.get(year, INK_4), opacity=0.85,
+            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Max Consecutive Wet Days ({region}, >={threshold} mm/day)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
@@ -942,12 +1009,10 @@ def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
         y_df = res[res["year"] == year]
         if y_df.empty:
             continue
-        fig.add_trace(go.Bar(
-            x=y_df["month_label"], y=y_df["stress_days"], name=year,
+        fig.add_trace(go.Bar(x=y_df["month_label"], y=y_df["stress_days"], name=year,
             marker_color=ALL_YEAR_COLORS.get(year, INK_4), opacity=0.85,
-            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>",
-        ))
-    layout = _base_layout(f"Heat Stress Days per Month ({region}, >{threshold}°C avg)", "Days")
+            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C avg)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
@@ -967,26 +1032,20 @@ def build_monthly_boxplot(daily_avg, region, selected_years):
     normals_m = normals_m.sort_values("month")
     latest_year = str(df[df["year"] != "Normal (Maxar)"]["year"].astype(str).max())
     fig = go.Figure()
-    fig.add_trace(go.Box(
-        x=monthly["month_label"], y=monthly["prcp_avg"],
+    fig.add_trace(go.Box(x=monthly["month_label"], y=monthly["prcp_avg"],
         name="Historical range", marker_color=INK_4,
         fillcolor="rgba(174,174,178,0.25)", line_color=INK_4,
-        boxpoints="outliers", whiskerwidth=0.5,
-    ))
+        boxpoints="outliers", whiskerwidth=0.5))
     curr = monthly[monthly["year"] == latest_year]
     if not curr.empty:
-        fig.add_trace(go.Scatter(
-            x=curr["month_label"], y=curr["prcp_avg"],
+        fig.add_trace(go.Scatter(x=curr["month_label"], y=curr["prcp_avg"],
             mode="markers+lines", name=latest_year,
             marker=dict(color=RED, size=8), line=dict(color=RED, width=2),
-            hovertemplate=f"<b>{latest_year}</b>  %{{x}}  %{{y:.1f}} mm<extra></extra>",
-        ))
-    fig.add_trace(go.Scatter(
-        x=normals_m["month_label"], y=normals_m["prcp_avg"],
+            hovertemplate=f"<b>{latest_year}</b>  %{{x}}  %{{y:.1f}} mm<extra></extra>"))
+    fig.add_trace(go.Scatter(x=normals_m["month_label"], y=normals_m["prcp_avg"],
         mode="lines", name="Normal (Maxar)",
         line=dict(color=INK_4, width=2, dash="dash"),
-        hovertemplate="<b>Normal (Maxar)</b>  %{x}  %{y:.1f} mm<extra></extra>",
-    ))
+        hovertemplate="<b>Normal (Maxar)</b>  %{x}  %{y:.1f} mm<extra></extra>"))
     layout = _base_layout(f"Monthly Precipitation Distribution ({region})", "mm")
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
@@ -995,43 +1054,10 @@ def build_monthly_boxplot(daily_avg, region, selected_years):
     return fig
 
 
-def build_ytd_vs_normals(daily_avg, region, selected_years, today):
-    df = daily_avg[daily_avg["region"] == region].copy()
-    ytd_normal = df[(df["year"] == "Normal (Maxar)") & (df["full_date"] <= today)]["prcp_avg"].sum()
-    if ytd_normal == 0:
-        return go.Figure()
-    results = []
-    for year in selected_years:
-        if year == "Normal (Maxar)":
-            continue
-        actual = df[(df["year"] == year) & (df["full_date"] <= today)]["prcp_avg"].sum()
-        results.append({"year": year, "pct": actual / ytd_normal * 100, "actual": actual})
-    if not results:
-        return go.Figure()
-    res = pd.DataFrame(results)
-    colors = [ALL_YEAR_COLORS.get(y, INK_4) for y in res["year"]]
-    fig = go.Figure(go.Bar(
-        x=res["pct"], y=res["year"], orientation="h",
-        marker_color=colors,
-        text=[f"{p:.0f}%  ({a:.0f} mm)" for p, a in zip(res["pct"], res["actual"])],
-        textposition="outside",
-        hovertemplate="<b>%{y}</b>  %{x:.1f}% of normal<extra></extra>",
-    ))
-    fig.add_vline(x=100, line_color=INK_3, line_width=1.5, line_dash="dash")
-    layout = _base_layout(
-        f"YTD Precip vs Normal (Maxar) — to {today.strftime('%b %d')} ({region})", "% of Normal")
-    layout["xaxis"]["ticksuffix"] = "%"
-    layout["xaxis"]["range"] = [0, max(res["pct"].max() * 1.25, 150)]
-    layout["showlegend"] = False
-    layout["height"] = max(260, 70 * len(results))
-    fig.update_layout(**layout)
-    return fig
-
-
 # -------------------------------------------------------
 # HELPER: render a full calendar-year origin tab
 # -------------------------------------------------------
-def render_calendar_tab(origin_name, selected_years, today):
+def render_calendar_tab(origin_name, selected_years, today, avg_option):
     c1, c2 = st.columns(2)
     with c1:
         with st.spinner(f"Loading {origin_name} precipitation..."):
@@ -1044,67 +1070,78 @@ def render_calendar_tab(origin_name, selected_years, today):
         st.error(f"No data for {origin_name}. Run backfill.py first.")
         return
 
-    daily_avg      = process_precipitation(raw_prcp, today)
-    daily_avg_temp = process_temperature(raw_temp, today)
-    agg_df         = process_rolling(daily_avg, today)
+    # Process full datasets (needed for avg computation)
+    daily_avg_full      = process_precipitation(raw_prcp, today)
+    daily_avg_temp_full = process_temperature(raw_temp, today)
+    agg_df_full         = process_rolling(daily_avg_full, today)
 
-    daily_avg      = daily_avg[daily_avg["year"].isin(selected_years)]
-    daily_avg_temp = daily_avg_temp[daily_avg_temp["year"].isin(selected_years)]
-    agg_df         = agg_df[agg_df["year"].isin(selected_years)]
+    # Compute averages from full unfiltered data
+    avg_cum_df = avg_roll_df = avg_temp_df = None
+    avg_label  = ""
+    avg_color  = AVG_5Y_COLOR
+    if avg_option != "None":
+        n         = 5 if "5" in avg_option else 10
+        avg_color = AVG_5Y_COLOR if n == 5 else AVG_10Y_COLOR
+        avg_label = f"{n}Y Avg"
+        avg_cum_df  = compute_cal_precip_avg(daily_avg_full, n)
+        avg_roll_df = compute_cal_rolling_avg(agg_df_full, n)
+        avg_temp_df = compute_cal_temp_avg(daily_avg_temp_full, n)
+
+    # Filter for display
+    daily_avg      = daily_avg_full[daily_avg_full["year"].isin(selected_years)]
+    daily_avg_temp = daily_avg_temp_full[daily_avg_temp_full["year"].isin(selected_years)]
+    agg_df         = agg_df_full[agg_df_full["year"].isin(selected_years)]
 
     active_colors = {y: c for y, c in ALL_YEAR_COLORS.items() if y in selected_years}
     regions       = sorted(daily_avg["region"].unique())
 
     for region in regions:
-        st.markdown(
-            f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
-            unsafe_allow_html=True,
-        )
-        st.plotly_chart(
-            build_cumulative_precip(daily_avg, region, active_colors),
-            use_container_width=True, key=f"cum_{origin_name}_{region}",
-        )
-        st.markdown(
-            f"<h2 class='section-header'>Temperature &nbsp;—&nbsp; {region}</h2>",
-            unsafe_allow_html=True,
-        )
-        st.plotly_chart(
-            build_temperature(daily_avg_temp, region, active_colors),
-            use_container_width=True, key=f"tmp_{origin_name}_{region}",
-        )
-        st.markdown(
-            f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
-            unsafe_allow_html=True,
-        )
-        st.plotly_chart(
-            build_rolling_precip(agg_df, region, today, active_colors),
-            use_container_width=True, key=f"rol_{origin_name}_{region}",
-        )
+        st.markdown(f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(build_cumulative_precip(daily_avg, region, active_colors,
+                        avg_cum_df, avg_label, avg_color),
+                        use_container_width=True, key=f"cum_{origin_name}_{region}")
+
+        st.markdown(f"<h2 class='section-header'>Temperature &nbsp;—&nbsp; {region}</h2>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(build_temperature(daily_avg_temp, region, active_colors,
+                        avg_temp_df, avg_label, avg_color),
+                        use_container_width=True, key=f"tmp_{origin_name}_{region}")
+
+        st.markdown(f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(build_rolling_precip(agg_df, region, today, active_colors,
+                        avg_roll_df, avg_label, avg_color),
+                        use_container_width=True, key=f"rol_{origin_name}_{region}")
 
         with st.expander("Advanced Analytics", expanded=False):
-            st.plotly_chart(
-                build_ytd_vs_normals(daily_avg, region, selected_years, today),
-                use_container_width=True, key=f"ytd_{origin_name}_{region}",
-            )
+            # Threshold inputs
+            th_col1, th_col2, th_col3 = st.columns(3)
+            with th_col1:
+                dry_threshold = st.number_input("Dry day threshold (mm)", min_value=0.0,
+                    value=1.0, step=0.5, key=f"dry_thr_{origin_name}_{region}")
+            with th_col2:
+                wet_threshold = st.number_input("Wet day threshold (mm)", min_value=0.0,
+                    value=1.0, step=0.5, key=f"wet_thr_{origin_name}_{region}")
+            with th_col3:
+                heat_threshold = st.number_input("Heat stress threshold (°C)", min_value=20.0,
+                    max_value=45.0, value=30.0, step=0.5, key=f"heat_thr_{origin_name}_{region}")
+
             c_a, c_b = st.columns(2)
             with c_a:
-                st.plotly_chart(
-                    build_precip_anomaly(daily_avg, region, selected_years),
-                    use_container_width=True, key=f"anom_{origin_name}_{region}",
-                )
-                st.plotly_chart(
-                    build_dry_days(daily_avg, region, selected_years),
-                    use_container_width=True, key=f"dry_{origin_name}_{region}",
-                )
+                st.plotly_chart(build_precip_anomaly(daily_avg, region, selected_years),
+                    use_container_width=True, key=f"anom_{origin_name}_{region}")
+                st.plotly_chart(build_dry_days(daily_avg, region, selected_years, dry_threshold),
+                    use_container_width=True, key=f"dry_{origin_name}_{region}")
             with c_b:
-                st.plotly_chart(
-                    build_monthly_boxplot(daily_avg, region, selected_years),
-                    use_container_width=True, key=f"box_{origin_name}_{region}",
-                )
-                st.plotly_chart(
-                    build_heat_stress(daily_avg_temp, region, selected_years),
-                    use_container_width=True, key=f"heat_{origin_name}_{region}",
-                )
+                st.plotly_chart(build_monthly_boxplot(daily_avg, region, selected_years),
+                    use_container_width=True, key=f"box_{origin_name}_{region}")
+                st.markdown(_BOX_EXPLANATION, unsafe_allow_html=True)
+                st.plotly_chart(build_wet_days(daily_avg, region, selected_years, wet_threshold),
+                    use_container_width=True, key=f"wet_{origin_name}_{region}")
+
+            st.plotly_chart(build_heat_stress(daily_avg_temp, region, selected_years, heat_threshold),
+                use_container_width=True, key=f"heat_{origin_name}_{region}")
 
 
 # -------------------------------------------------------
@@ -1125,18 +1162,33 @@ today = pd.Timestamp.today().normalize()
 with st.sidebar:
     st.markdown(
         f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
-        f"text-transform:uppercase;color:{INK_3};margin-bottom:.6rem'>Filters</p>",
+        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Year Range</p>",
         unsafe_allow_html=True,
     )
-    selected_years = st.multiselect(
-        "Years (calendar origins)",
-        options=CALENDAR_YEARS,
-        default=CALENDAR_YEARS,
-        help="Applies to Colombia, Honduras, Super 4, Vietnam",
+    year_start, year_end = st.select_slider(
+        "Years",
+        options=list(range(2016, 2027)),
+        value=(2023, 2026),
+        label_visibility="collapsed",
     )
+    selected_years = [str(y) for y in range(year_start, year_end + 1)] + ["Normal (Maxar)"]
+
     st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
                 unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
+        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Historical Average</p>",
+        unsafe_allow_html=True,
+    )
+    avg_option = st.radio(
+        "Show average line",
+        options=["None", "Last 5 Years", "Last 10 Years"],
+        index=0,
+        label_visibility="collapsed",
+    )
 
+    st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
+                unsafe_allow_html=True)
     if st.button("Clear Cache", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -1145,23 +1197,19 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown(
         f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
-        f"text-transform:uppercase;color:{INK_3};margin-bottom:.6rem'>Year colors</p>",
+        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Avg line colors</p>",
         unsafe_allow_html=True,
     )
-    for yr, col in ALL_YEAR_COLORS.items():
+    for label, col in [("5Y Avg", AVG_5Y_COLOR), ("10Y Avg", AVG_10Y_COLOR)]:
         st.markdown(
             f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px'>"
             f"<span style='width:12px;height:12px;border-radius:2px;background:{col};"
             f"display:inline-block'></span>"
-            f"<span style='font-size:.82rem;color:{INK_2}'>{yr}</span></div>",
+            f"<span style='font-size:.82rem;color:{INK_2}'>{label}</span></div>",
             unsafe_allow_html=True,
         )
     st.markdown(f"<p style='font-size:.75rem;color:{INK_4};margin-top:.8rem'>"
                 f"Today: {today.strftime('%Y-%m-%d')}</p>", unsafe_allow_html=True)
-
-if not selected_years:
-    st.warning("Select at least one year from the sidebar.")
-    st.stop()
 
 # ---------- TABS ----------
 tab_brazil, tab_colombia, tab_honduras, tab_super4, tab_vietnam = st.tabs([
@@ -1196,20 +1244,31 @@ with tab_brazil:
 
             real_rolled, normals_rolled = process_brazil_rolling(real_daily, normals_daily)
 
+            # Average line computation (uses full crop year data before user filter)
+            avg_cum_df = avg_roll_df = avg_temp_df = None
+            avg_label  = ""
+            avg_color  = AVG_5Y_COLOR
+            if avg_option != "None":
+                n         = 5 if "5" in avg_option else 10
+                avg_color = AVG_5Y_COLOR if n == 5 else AVG_10Y_COLOR
+                avg_label = f"{n}Y Avg"
+                avg_cum_df  = compute_brazil_precip_avg(real_daily, n, crop_years_sorted)
+                avg_roll_df = compute_brazil_rolling_avg(real_rolled, n, crop_years_sorted)
+                if not real_daily_temp.empty:
+                    avg_temp_df = compute_brazil_temp_avg(real_daily_temp, n, crop_years_sorted)
+
+            # Filters row
             filter_col1, filter_col2 = st.columns(2)
             with filter_col1:
                 regions_all = sorted(real_daily["region"].unique())
                 selected_regions_brazil = st.multiselect(
-                    "Sub-Regions",
-                    options=regions_all,
-                    default=regions_all,
+                    "Sub-Regions", options=regions_all, default=regions_all,
                     key="brazil_region_filter",
                 )
             with filter_col2:
+                default_cys = crop_years_sorted[-4:] if len(crop_years_sorted) >= 4 else crop_years_sorted
                 selected_crop_years = st.multiselect(
-                    "Crop Years",
-                    options=crop_years_sorted,
-                    default=crop_years_sorted,
+                    "Crop Years", options=crop_years_sorted, default=default_cys,
                     key="brazil_cy_filter",
                 )
 
@@ -1217,96 +1276,79 @@ with tab_brazil:
                 st.warning("Select at least one sub-region.")
             else:
                 for region in selected_regions_brazil:
-                    st.markdown(
-                        f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
+                                unsafe_allow_html=True)
                     st.plotly_chart(
-                        build_brazil_cumulative(
-                            real_daily, normals_daily, region,
-                            crop_years_sorted, crop_year_colors, latest_cy,
-                            selected_crop_years,
-                        ),
-                        use_container_width=True, key=f"bra_cum_{region}",
-                    )
+                        build_brazil_cumulative(real_daily, normals_daily, region,
+                            crop_years_sorted, crop_year_colors, latest_cy, selected_crop_years,
+                            avg_cum_df, avg_label, avg_color),
+                        use_container_width=True, key=f"bra_cum_{region}")
 
                     if not real_daily_temp.empty:
-                        st.markdown(
-                            f"<h2 class='section-header'>Average Temperature &nbsp;—&nbsp; {region}</h2>",
-                            unsafe_allow_html=True,
-                        )
+                        st.markdown(f"<h2 class='section-header'>Average Temperature &nbsp;—&nbsp; {region}</h2>",
+                                    unsafe_allow_html=True)
                         st.plotly_chart(
-                            build_brazil_temperature(
-                                real_daily_temp, normals_daily_temp, region,
-                                crop_years_sorted, crop_year_colors, latest_cy,
-                                selected_crop_years,
-                            ),
-                            use_container_width=True, key=f"bra_tmp_{region}",
-                        )
+                            build_brazil_temperature(real_daily_temp, normals_daily_temp, region,
+                                crop_years_sorted, crop_year_colors, latest_cy, selected_crop_years,
+                                avg_temp_df, avg_label, avg_color),
+                            use_container_width=True, key=f"bra_tmp_{region}")
 
-                    st.markdown(
-                        f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
+                                unsafe_allow_html=True)
                     st.plotly_chart(
-                        build_brazil_rolling(
-                            real_rolled, normals_rolled, region,
-                            crop_years_sorted, crop_year_colors,
-                            selected_crop_years,
-                        ),
-                        use_container_width=True, key=f"bra_rol_{region}",
-                    )
+                        build_brazil_rolling(real_rolled, normals_rolled, region,
+                            crop_years_sorted, crop_year_colors, selected_crop_years,
+                            avg_roll_df, avg_label, avg_color),
+                        use_container_width=True, key=f"bra_rol_{region}")
 
                     with st.expander("Advanced Analytics", expanded=False):
-                        st.plotly_chart(
-                            build_brazil_ytd_vs_normals(
-                                real_daily, normals_daily, region,
-                                crop_years_sorted, crop_year_colors,
-                                selected_crop_years, today,
-                            ),
-                            use_container_width=True, key=f"bra_ytd_{region}",
-                        )
+                        # Threshold inputs
+                        th_col1, th_col2, th_col3 = st.columns(3)
+                        with th_col1:
+                            dry_thr = st.number_input("Dry threshold (mm)", min_value=0.0,
+                                value=1.0, step=0.5, key=f"bra_dry_thr_{region}")
+                        with th_col2:
+                            wet_thr = st.number_input("Wet threshold (mm)", min_value=0.0,
+                                value=1.0, step=0.5, key=f"bra_wet_thr_{region}")
+                        with th_col3:
+                            heat_thr = st.number_input("Heat stress threshold (°C)", min_value=20.0,
+                                max_value=45.0, value=28.0, step=0.5, key=f"bra_heat_thr_{region}")
+
                         c_a, c_b = st.columns(2)
                         with c_a:
-                            st.plotly_chart(
-                                build_brazil_precip_anomaly(
-                                    real_daily, normals_daily, region,
-                                    crop_years_sorted, crop_year_colors, selected_crop_years,
-                                ),
-                                use_container_width=True, key=f"bra_anom_{region}",
-                            )
-                            st.plotly_chart(
-                                build_brazil_dry_days(
-                                    real_daily, region, crop_years_sorted,
-                                    crop_year_colors, selected_crop_years,
-                                ),
-                                use_container_width=True, key=f"bra_dry_{region}",
-                            )
+                            st.plotly_chart(build_brazil_precip_anomaly(
+                                real_daily, normals_daily, region,
+                                crop_years_sorted, crop_year_colors, selected_crop_years),
+                                use_container_width=True, key=f"bra_anom_{region}")
+                            st.plotly_chart(build_brazil_dry_days(
+                                real_daily, region, crop_years_sorted,
+                                crop_year_colors, selected_crop_years, dry_thr),
+                                use_container_width=True, key=f"bra_dry_{region}")
                         with c_b:
-                            st.plotly_chart(
-                                build_brazil_monthly_boxplot(
-                                    real_daily, normals_daily, region,
-                                    crop_years_sorted, crop_year_colors, latest_cy,
-                                ),
-                                use_container_width=True, key=f"bra_box_{region}",
-                            )
-                            st.plotly_chart(
-                                build_brazil_heat_stress(
-                                    real_daily_temp, region, crop_years_sorted,
-                                    crop_year_colors, selected_crop_years,
-                                ),
-                                use_container_width=True, key=f"bra_heat_{region}",
-                            )
+                            st.plotly_chart(build_brazil_monthly_boxplot(
+                                real_daily, normals_daily, region,
+                                crop_years_sorted, crop_year_colors, latest_cy),
+                                use_container_width=True, key=f"bra_box_{region}")
+                            st.markdown(_BOX_EXPLANATION, unsafe_allow_html=True)
+                            st.plotly_chart(build_brazil_wet_days(
+                                real_daily, region, crop_years_sorted,
+                                crop_year_colors, selected_crop_years, wet_thr),
+                                use_container_width=True, key=f"bra_wet_{region}")
+
+                        st.plotly_chart(build_brazil_heat_stress(
+                            real_daily_temp, region, crop_years_sorted,
+                            crop_year_colors, selected_crop_years, heat_thr),
+                            use_container_width=True, key=f"bra_heat_{region}")
 
 # ---- CALENDAR-YEAR ORIGINS ----
 with tab_colombia:
-    render_calendar_tab("Colombia", selected_years, today)
+    render_calendar_tab("Colombia", selected_years, today, avg_option)
 
 with tab_honduras:
-    render_calendar_tab("Honduras", selected_years, today)
+    render_calendar_tab("Honduras", selected_years, today, avg_option)
 
 with tab_super4:
-    render_calendar_tab("Super 4", selected_years, today)
+    render_calendar_tab("Super 4", selected_years, today, avg_option)
 
 with tab_vietnam:
-    render_calendar_tab("Vietnam", selected_years, today)
+    render_calendar_tab("Vietnam", selected_years, today, avg_option)
