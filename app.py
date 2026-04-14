@@ -195,7 +195,7 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
 # PROCESSING — BRAZIL
 # -------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
+def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp, sm: int = 9):
     df = raw_prcp[raw_prcp["date"] != "02-29"].copy().reset_index(drop=True)
     df_real    = df[df["year"] != "Normal (Maxar)"].copy()
     df_normals = df[df["year"] == "Normal (Maxar)"].copy()
@@ -206,14 +206,9 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
     )
     df_real = df_real[df_real["full_date"].notna()].copy()
 
-    def _crop_label(dt):
-        if dt.month >= 9:
-            return f"{dt.year % 100:02d}/{(dt.year + 1) % 100:02d}"
-        return f"{(dt.year - 1) % 100:02d}/{dt.year % 100:02d}"
-
-    df_real["crop_year"] = df_real["full_date"].apply(_crop_label)
+    df_real["crop_year"] = df_real["full_date"].apply(lambda dt: _brazil_crop_label(dt, sm))
     df_real["xdate"] = df_real["full_date"].apply(
-        lambda dt: pd.Timestamp(2000 if dt.month >= 9 else 2001, dt.month, dt.day)
+        lambda dt: pd.Timestamp(2000 if dt.month >= sm else 2001, dt.month, dt.day)
     )
     df_real["tag"] = df_real["full_date"].apply(
         lambda d: "realized" if d <= today else "forecast"
@@ -224,11 +219,9 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
         .sort_values("xdate")
     )
     real_daily["cumulative_prcp"] = real_daily.groupby(["region", "crop_year"])["prcp_avg"].cumsum()
-    # Start from 16/17 — 15/16 is excluded (incomplete picture)
-    real_daily = real_daily[real_daily["crop_year"] >= "16/17"].copy()
+    real_daily = real_daily[real_daily["crop_year"] >= _brazil_min_cy(sm)].copy()
 
-    def _cy_end(cy): return int(cy.split("/")[1])
-    crop_years_sorted = sorted(real_daily["crop_year"].unique(), key=_cy_end)
+    crop_years_sorted = sorted(real_daily["crop_year"].unique(), key=lambda cy: _brazil_cy_sort_key(cy, sm))
     crop_year_colors  = {
         cy: CROP_COLOR_PALETTE[i] if i < len(CROP_COLOR_PALETTE) else INK_4
         for i, cy in enumerate(reversed(crop_years_sorted))
@@ -238,7 +231,7 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
     df_normals["day"]   = df_normals["date"].str[3:].astype(int)
     df_normals["xdate"] = df_normals.apply(
-        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]), axis=1,
+        lambda r: pd.Timestamp(2000 if r["month"] >= sm else 2001, r["month"], r["day"]), axis=1,
     )
     normals_daily = (
         df_normals.groupby(["region", "xdate"], as_index=False)
@@ -250,7 +243,7 @@ def process_brazil(raw_prcp: pd.DataFrame, today: pd.Timestamp):
 
 
 @st.cache_data(show_spinner=False)
-def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
+def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp, sm: int = 9):
     df = raw_temp[raw_temp["date"] != "02-29"].copy().reset_index(drop=True)
     df_real    = df[df["year"] != "Normal (Maxar)"].copy()
     df_normals = df[df["year"] == "Normal (Maxar)"].copy()
@@ -261,14 +254,9 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
     )
     df_real = df_real[df_real["full_date"].notna()].copy()
 
-    def _crop_label(dt):
-        if dt.month >= 9:
-            return f"{dt.year % 100:02d}/{(dt.year + 1) % 100:02d}"
-        return f"{(dt.year - 1) % 100:02d}/{dt.year % 100:02d}"
-
-    df_real["crop_year"] = df_real["full_date"].apply(_crop_label)
+    df_real["crop_year"] = df_real["full_date"].apply(lambda dt: _brazil_crop_label(dt, sm))
     df_real["xdate"] = df_real["full_date"].apply(
-        lambda dt: pd.Timestamp(2000 if dt.month >= 9 else 2001, dt.month, dt.day)
+        lambda dt: pd.Timestamp(2000 if dt.month >= sm else 2001, dt.month, dt.day)
     )
     df_real["tag"] = df_real["full_date"].apply(
         lambda d: "realized" if d <= today else "forecast"
@@ -286,12 +274,12 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
     for col in ["tmin_avg", "tmax_avg"]:
         if col not in real_daily.columns:
             real_daily[col] = pd.NA
-    real_daily = real_daily[real_daily["crop_year"] >= "16/17"].copy()
+    real_daily = real_daily[real_daily["crop_year"] >= _brazil_min_cy(sm)].copy()
 
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
     df_normals["day"]   = df_normals["date"].str[3:].astype(int)
     df_normals["xdate"] = df_normals.apply(
-        lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]), axis=1,
+        lambda r: pd.Timestamp(2000 if r["month"] >= sm else 2001, r["month"], r["day"]), axis=1,
     )
     n_agg = {"tavg_avg": ("tavg", "mean")}
     if "tmin" in df_normals.columns:
@@ -426,12 +414,35 @@ _DT_XAXIS_CAL = dict(
     gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
     linecolor=BORDER, zerolinecolor=BORDER,
 )
-_DT_XAXIS_BRAZIL = dict(
-    tickformat="%b", dtick="M1", tick0="2000-09-01",
-    range=["2000-09-01", "2001-08-31"],
-    gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
-    linecolor=BORDER, zerolinecolor=BORDER,
-)
+_MONTH_NAMES_LIST = ["January","February","March","April","May","June",
+                     "July","August","September","October","November","December"]
+_MNUM_MAP = {n: i+1 for i, n in enumerate(_MONTH_NAMES_LIST)}
+
+def _brazil_crop_label(dt, sm):
+    if sm == 1:
+        return str(dt.year)
+    if dt.month >= sm:
+        return f"{dt.year % 100:02d}/{(dt.year+1) % 100:02d}"
+    return f"{(dt.year-1) % 100:02d}/{dt.year % 100:02d}"
+
+def _brazil_cy_sort_key(cy, sm):
+    return int(cy) if sm == 1 else int(cy.split("/")[1])
+
+def _brazil_min_cy(sm):
+    return "2016" if sm == 1 else "16/17"
+
+def _brazil_crop_xaxis(sm):
+    start = pd.Timestamp(2000, sm, 1)
+    end   = (start + pd.DateOffset(years=1)) - pd.Timedelta(days=1)
+    return dict(
+        tickformat="%b", dtick="M1", tick0=start.strftime("%Y-%m-%d"),
+        range=[start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")],
+        gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
+        linecolor=BORDER, zerolinecolor=BORDER,
+    )
+
+def _brazil_month_order(sm):
+    return [(sm - 1 + i) % 12 + 1 for i in range(12)]
 
 _BOX_EXPLANATION = (
     "<p style='font-size:.71rem;color:#6e6e73;font-style:italic;margin-top:.3rem'>"
@@ -553,7 +564,7 @@ def build_rolling_precip(agg_df, region, today, year_colors, avg_df=None, avg_la
 # BRAZIL CHART BUILDERS
 # -------------------------------------------------------
 def build_brazil_cumulative(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors,
-                             latest_crop_year, selected_crop_years, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
+                             latest_crop_year, selected_crop_years, sm=9, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = real_daily[real_daily["region"] == region].copy()
     df_n = normals_daily[normals_daily["region"] == region].sort_values("xdate")
     fig  = go.Figure()
@@ -594,14 +605,14 @@ def build_brazil_cumulative(real_daily, normals_daily, region, crop_years_sorted
                 line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
                 hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
     layout = _base_layout(f"Cumulative Precipitation — Crop Year  ({region})", "mm")
-    layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
+    layout["xaxis"] = _brazil_crop_xaxis(sm)
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
 
 
 def build_brazil_temperature(real_daily_temp, normals_daily_temp, region, crop_years_sorted, crop_year_colors,
-                              latest_crop_year, selected_crop_years, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
+                              latest_crop_year, selected_crop_years, sm=9, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
     df_n = normals_daily_temp[normals_daily_temp["region"] == region].sort_values("xdate")
     fig  = go.Figure()
@@ -643,14 +654,14 @@ def build_brazil_temperature(real_daily_temp, normals_daily_temp, region, crop_y
                 line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
                 hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>"))
     layout = _base_layout(f"Average Temperature — Crop Year  ({region})", "°C")
-    layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
+    layout["xaxis"] = _brazil_crop_xaxis(sm)
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
 
 
 def build_brazil_rolling(real_rolled, normals_rolled, region, crop_years_sorted, crop_year_colors,
-                          selected_crop_years, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
+                          selected_crop_years, sm=9, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
     df_r = real_rolled[real_rolled["region"] == region].copy()
     df_n = normals_rolled[normals_rolled["region"] == region].sort_values("xdate")
     fig  = go.Figure()
@@ -676,7 +687,7 @@ def build_brazil_rolling(real_rolled, normals_rolled, region, crop_years_sorted,
                 line=dict(color=avg_color, width=2.5, dash="dashdot"), connectgaps=True,
                 hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>"))
     layout = _base_layout(f"30-Day Rolling Precipitation — Crop Year  ({region})", "Rolling Sum (mm)")
-    layout["xaxis"] = _DT_XAXIS_BRAZIL.copy()
+    layout["xaxis"] = _brazil_crop_xaxis(sm)
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
@@ -695,7 +706,7 @@ _CAL_MONTH_LABELS    = [_MONTH_LABELS[m] for m in range(1, 13)]
 # -------------------------------------------------------
 # ADVANCED ANALYTICS — BRAZIL
 # -------------------------------------------------------
-def build_brazil_precip_anomaly(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years):
+def build_brazil_precip_anomaly(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, sm=9):
     df_r = real_daily[real_daily["region"] == region].copy()
     df_n = normals_daily[normals_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
@@ -705,7 +716,8 @@ def build_brazil_precip_anomaly(real_daily, normals_daily, region, crop_years_so
     merged    = real_m.merge(normals_m, on="month")
     merged["anomaly"]     = merged["real_sum"] - merged["normal_sum"]
     merged["month_label"] = merged["month"].map(_MONTH_LABELS)
-    merged["month_order"] = merged["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
+    mo = _brazil_month_order(sm)
+    merged["month_order"] = merged["month"].map({m: i for i, m in enumerate(mo)})
     merged = merged.sort_values("month_order")
     fig = go.Figure()
     for cy in crop_years_sorted:
@@ -721,13 +733,14 @@ def build_brazil_precip_anomaly(real_daily, normals_daily, region, crop_years_so
     layout = _base_layout(f"Monthly Precipitation Anomaly vs Normal (Maxar) ({region})", "mm above/below normal")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = [_MONTH_LABELS[m] for m in mo]
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=1.0):
+def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=1.0, sm=9):
+    mo   = _brazil_month_order(sm)
     df_r = real_daily[real_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
     results = []
@@ -735,7 +748,7 @@ def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_color
         if cy not in selected_crop_years:
             continue
         cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
-        for month in _BRAZIL_MONTH_ORDER:
+        for month in mo:
             m_df = cy_df[cy_df["month"] == month]
             if m_df.empty:
                 continue
@@ -748,7 +761,7 @@ def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_color
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res["month_order"] = res["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
+    res["month_order"] = res["month"].map({m: i for i, m in enumerate(mo)})
     res = res.sort_values("month_order")
     fig = go.Figure()
     for cy in crop_years_sorted:
@@ -763,13 +776,14 @@ def build_brazil_dry_days(real_daily, region, crop_years_sorted, crop_year_color
     layout = _base_layout(f"Max Consecutive Dry Days ({region}, <{threshold} mm/day)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = [_MONTH_LABELS[m] for m in mo]
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_brazil_wet_days(real_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=1.0):
+def build_brazil_wet_days(real_daily, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=1.0, sm=9):
+    mo   = _brazil_month_order(sm)
     df_r = real_daily[real_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
     results = []
@@ -777,7 +791,7 @@ def build_brazil_wet_days(real_daily, region, crop_years_sorted, crop_year_color
         if cy not in selected_crop_years:
             continue
         cy_df = df_r[df_r["crop_year"] == cy].sort_values("xdate")
-        for month in _BRAZIL_MONTH_ORDER:
+        for month in mo:
             m_df = cy_df[cy_df["month"] == month]
             if m_df.empty:
                 continue
@@ -790,7 +804,7 @@ def build_brazil_wet_days(real_daily, region, crop_years_sorted, crop_year_color
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res["month_order"] = res["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
+    res["month_order"] = res["month"].map({m: i for i, m in enumerate(mo)})
     res = res.sort_values("month_order")
     fig = go.Figure()
     for cy in crop_years_sorted:
@@ -805,15 +819,16 @@ def build_brazil_wet_days(real_daily, region, crop_years_sorted, crop_year_color
     layout = _base_layout(f"Max Consecutive Wet Days ({region}, >={threshold} mm/day)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = [_MONTH_LABELS[m] for m in mo]
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=28.0):
+def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=28.0, sm=9):
     if real_daily_temp.empty:
         return go.Figure()
+    mo   = _brazil_month_order(sm)
     df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
     temp_col = "tmax_avg" if "tmax_avg" in df_r.columns and df_r["tmax_avg"].notna().any() else "tavg_avg"
     df_r["month"] = df_r["xdate"].dt.month
@@ -822,7 +837,7 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
         if cy not in selected_crop_years:
             continue
         cy_df = df_r[df_r["crop_year"] == cy]
-        for month in _BRAZIL_MONTH_ORDER:
+        for month in mo:
             m_df = cy_df[cy_df["month"] == month]
             if m_df.empty:
                 continue
@@ -832,7 +847,7 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res["month_order"] = res["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
+    res["month_order"] = res["month"].map({m: i for i, m in enumerate(mo)})
     res = res.sort_values("month_order")
     fig = go.Figure()
     for cy in crop_years_sorted:
@@ -848,7 +863,7 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
     layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C {temp_label})", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = [_MONTH_LABELS[m] for m in mo]
     layout["legend"]["title"]["text"] = "Crop Year"
     fig.update_layout(**layout)
     return fig
@@ -947,7 +962,8 @@ def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=
     return fig
 
 
-def build_brazil_monthly_boxplot(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors, latest_crop_year):
+def build_brazil_monthly_boxplot(real_daily, normals_daily, region, crop_years_sorted, crop_year_colors, latest_crop_year, sm=9):
+    mo   = _brazil_month_order(sm)
     df_r = real_daily[real_daily["region"] == region].copy()
     df_n = normals_daily[normals_daily["region"] == region].copy()
     df_r["month"] = df_r["xdate"].dt.month
@@ -956,8 +972,8 @@ def build_brazil_monthly_boxplot(real_daily, normals_daily, region, crop_years_s
     normals_m = df_n.groupby("month")["prcp_avg"].sum().reset_index()
     monthly["month_label"]   = monthly["month"].map(_MONTH_LABELS)
     normals_m["month_label"] = normals_m["month"].map(_MONTH_LABELS)
-    monthly["month_order"]   = monthly["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
-    normals_m["month_order"] = normals_m["month"].map({m: i for i, m in enumerate(_BRAZIL_MONTH_ORDER)})
+    monthly["month_order"]   = monthly["month"].map({m: i for i, m in enumerate(mo)})
+    normals_m["month_order"] = normals_m["month"].map({m: i for i, m in enumerate(mo)})
     monthly   = monthly.sort_values("month_order")
     normals_m = normals_m.sort_values("month_order")
     fig = go.Figure()
@@ -977,7 +993,7 @@ def build_brazil_monthly_boxplot(real_daily, normals_daily, region, crop_years_s
         hovertemplate="<b>Normal (Maxar)</b>  %{x}  %{y:.1f} mm<extra></extra>"))
     layout = _base_layout(f"Monthly Precipitation Distribution ({region})", "mm")
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = [_MONTH_LABELS[m] for m in mo]
     layout["legend"]["title"]["text"] = "Series"
     fig.update_layout(**layout)
     return fig
@@ -1291,6 +1307,19 @@ today = pd.Timestamp.today().normalize()
 with st.sidebar:
     st.markdown(
         f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
+        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Brazil Crop Year Start</p>",
+        unsafe_allow_html=True,
+    )
+    crop_start_name = st.selectbox(
+        "Brazil Crop Start Month", _MONTH_NAMES_LIST, index=8,   # September default
+        label_visibility="collapsed",
+    )
+    sm = _MNUM_MAP[crop_start_name]
+
+    st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
+                unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
         f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Year Range</p>",
         unsafe_allow_html=True,
     )
@@ -1365,10 +1394,10 @@ with tab_brazil:
             st.error("No data for Brazil. Run backfill.py first.")
         else:
             real_daily, normals_daily, crop_years_sorted, crop_year_colors, latest_cy = \
-                process_brazil(raw_brazil_prcp, today)
+                process_brazil(raw_brazil_prcp, today, sm)
 
             real_daily_temp, normals_daily_temp = \
-                process_brazil_temp(raw_brazil_temp, today) if not raw_brazil_temp.empty \
+                process_brazil_temp(raw_brazil_temp, today, sm) if not raw_brazil_temp.empty \
                 else (pd.DataFrame(), pd.DataFrame())
 
             real_rolled, normals_rolled = process_brazil_rolling(real_daily, normals_daily)
@@ -1410,7 +1439,7 @@ with tab_brazil:
                     st.plotly_chart(
                         build_brazil_cumulative(real_daily, normals_daily, region,
                             crop_years_sorted, crop_year_colors, latest_cy, selected_crop_years,
-                            avg_cum_df, avg_label, avg_color),
+                            sm, avg_cum_df, avg_label, avg_color),
                         use_container_width=True, key=f"bra_cum_{region}")
 
                     if not real_daily_temp.empty:
@@ -1419,7 +1448,7 @@ with tab_brazil:
                         st.plotly_chart(
                             build_brazil_temperature(real_daily_temp, normals_daily_temp, region,
                                 crop_years_sorted, crop_year_colors, latest_cy, selected_crop_years,
-                                avg_temp_df, avg_label, avg_color),
+                                sm, avg_temp_df, avg_label, avg_color),
                             use_container_width=True, key=f"bra_tmp_{region}")
 
                     st.markdown(f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
@@ -1427,7 +1456,7 @@ with tab_brazil:
                     st.plotly_chart(
                         build_brazil_rolling(real_rolled, normals_rolled, region,
                             crop_years_sorted, crop_year_colors, selected_crop_years,
-                            avg_roll_df, avg_label, avg_color),
+                            sm, avg_roll_df, avg_label, avg_color),
                         use_container_width=True, key=f"bra_rol_{region}")
 
                     with st.expander("Advanced Analytics", expanded=False):
@@ -1450,28 +1479,28 @@ with tab_brazil:
                         with c_a:
                             st.plotly_chart(build_brazil_precip_anomaly(
                                 real_daily, normals_daily, region,
-                                crop_years_sorted, crop_year_colors, selected_crop_years),
+                                crop_years_sorted, crop_year_colors, selected_crop_years, sm),
                                 use_container_width=True, key=f"bra_anom_{region}")
                             st.plotly_chart(build_brazil_dry_days(
                                 real_daily, region, crop_years_sorted,
-                                crop_year_colors, selected_crop_years, dry_thr),
+                                crop_year_colors, selected_crop_years, dry_thr, sm),
                                 use_container_width=True, key=f"bra_dry_{region}")
                         with c_b:
                             st.plotly_chart(build_brazil_monthly_boxplot(
                                 real_daily, normals_daily, region,
-                                crop_years_sorted, crop_year_colors, latest_cy),
+                                crop_years_sorted, crop_year_colors, latest_cy, sm),
                                 use_container_width=True, key=f"bra_box_{region}")
                             st.markdown(_BOX_EXPLANATION, unsafe_allow_html=True)
                             st.plotly_chart(build_brazil_wet_days(
                                 real_daily, region, crop_years_sorted,
-                                crop_year_colors, selected_crop_years, wet_thr),
+                                crop_year_colors, selected_crop_years, wet_thr, sm),
                                 use_container_width=True, key=f"bra_wet_{region}")
 
                         c_heat, c_frost = st.columns(2)
                         with c_heat:
                             st.plotly_chart(build_brazil_heat_stress(
                                 real_daily_temp, region, crop_years_sorted,
-                                crop_year_colors, selected_crop_years, heat_thr),
+                                crop_year_colors, selected_crop_years, heat_thr, sm),
                                 use_container_width=True, key=f"bra_heat_{region}")
                         with c_frost:
                             st.plotly_chart(build_brazil_frost_risk_days(
