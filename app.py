@@ -84,7 +84,7 @@ def load_origin_data(origin_name: str, parameter: str) -> pd.DataFrame:
     if parameter == "PRCP":
         sql = f"SELECT station, region, year, date, prcp, prcp_sum FROM read_parquet('{path_str}') WHERE prcp IS NOT NULL OR prcp_sum IS NOT NULL"
     else:
-        sql = f"SELECT station, region, year, date, tavg FROM read_parquet('{path_str}') WHERE tavg IS NOT NULL"
+        sql = f"SELECT station, region, year, date, tavg, tmin, tmax FROM read_parquet('{path_str}') WHERE tavg IS NOT NULL OR tmin IS NOT NULL OR tmax IS NOT NULL"
     return duckdb.query(sql).df()
 
 
@@ -122,11 +122,19 @@ def process_precipitation(raw_df: pd.DataFrame, today: pd.Timestamp):
 @st.cache_data(show_spinner=False)
 def process_temperature(raw_df: pd.DataFrame, today: pd.Timestamp):
     df = raw_df[raw_df["date"] != "02-29"].copy().reset_index(drop=True)
+    agg_cols = {"tavg_avg": ("tavg", "mean")}
+    if "tmin" in df.columns:
+        agg_cols["tmin_avg"] = ("tmin", "mean")
+    if "tmax" in df.columns:
+        agg_cols["tmax_avg"] = ("tmax", "mean")
     daily_avg = (
         df.groupby(["region", "year", "date"])
-        .agg(tavg_avg=("tavg", "mean"))
+        .agg(**agg_cols)
         .reset_index()
     )
+    for col in ["tmin_avg", "tmax_avg"]:
+        if col not in daily_avg.columns:
+            daily_avg[col] = pd.NA
     daily_avg["tag"] = daily_avg.apply(
         lambda r: "realized" if r["year"] == "Normal (Maxar)"
         else ("realized" if pd.to_datetime(f"{r['year']}-{r['date']}") <= today else "forecast"),
@@ -265,11 +273,19 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
     df_real["tag"] = df_real["full_date"].apply(
         lambda d: "realized" if d <= today else "forecast"
     )
+    agg_cols = {"tavg_avg": ("tavg", "mean")}
+    if "tmin" in df_real.columns:
+        agg_cols["tmin_avg"] = ("tmin", "mean")
+    if "tmax" in df_real.columns:
+        agg_cols["tmax_avg"] = ("tmax", "mean")
     real_daily = (
         df_real.groupby(["region", "crop_year", "xdate", "tag"], as_index=False)
-        .agg(tavg_avg=("tavg", "mean"))
+        .agg(**agg_cols)
         .sort_values("xdate")
     )
+    for col in ["tmin_avg", "tmax_avg"]:
+        if col not in real_daily.columns:
+            real_daily[col] = pd.NA
     real_daily = real_daily[real_daily["crop_year"] >= "16/17"].copy()
 
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
@@ -277,11 +293,19 @@ def process_brazil_temp(raw_temp: pd.DataFrame, today: pd.Timestamp):
     df_normals["xdate"] = df_normals.apply(
         lambda r: pd.Timestamp(2000 if r["month"] >= 9 else 2001, r["month"], r["day"]), axis=1,
     )
+    n_agg = {"tavg_avg": ("tavg", "mean")}
+    if "tmin" in df_normals.columns:
+        n_agg["tmin_avg"] = ("tmin", "mean")
+    if "tmax" in df_normals.columns:
+        n_agg["tmax_avg"] = ("tmax", "mean")
     normals_daily = (
         df_normals.groupby(["region", "xdate"], as_index=False)
-        .agg(tavg_avg=("tavg", "mean"))
+        .agg(**n_agg)
         .sort_values("xdate")
     )
+    for col in ["tmin_avg", "tmax_avg"]:
+        if col not in normals_daily.columns:
+            normals_daily[col] = pd.NA
     return real_daily, normals_daily
 
 
@@ -791,6 +815,7 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
     if real_daily_temp.empty:
         return go.Figure()
     df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
+    temp_col = "tmax_avg" if "tmax_avg" in df_r.columns and df_r["tmax_avg"].notna().any() else "tavg_avg"
     df_r["month"] = df_r["xdate"].dt.month
     results = []
     for cy in crop_years_sorted:
@@ -802,7 +827,7 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
             if m_df.empty:
                 continue
             results.append({"crop_year": cy, "month": month,
-                             "stress_days": int((m_df["tavg_avg"] > threshold).sum())})
+                             "stress_days": int((m_df[temp_col] > threshold).sum())})
     if not results:
         return go.Figure()
     res = pd.DataFrame(results)
@@ -819,11 +844,105 @@ def build_brazil_heat_stress(real_daily_temp, region, crop_years_sorted, crop_ye
         fig.add_trace(go.Bar(x=cy_df["month_label"], y=cy_df["stress_days"], name=cy,
             marker_color=crop_year_colors.get(cy, INK_4), opacity=0.85,
             hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>"))
-    layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C avg)", "Days")
+    temp_label = "max" if temp_col == "tmax_avg" else "avg"
+    layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C {temp_label})", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _BRAZIL_MONTH_LABELS
     layout["legend"]["title"]["text"] = "Crop Year"
+    fig.update_layout(**layout)
+    return fig
+
+
+def build_brazil_frost_risk_days(real_daily_temp, region, crop_years_sorted, crop_year_colors, selected_crop_years, threshold=3.0):
+    """Days per month where TMIN <= threshold (frost risk). Brazil only."""
+    if real_daily_temp.empty or "tmin_avg" not in real_daily_temp.columns:
+        return go.Figure()
+    df_r = real_daily_temp[real_daily_temp["region"] == region].copy()
+    if df_r["tmin_avg"].isna().all():
+        return go.Figure()
+    df_r["month"] = df_r["xdate"].dt.month
+    # Only show frost-risk months (May–Sep for Brazil southern hemisphere)
+    frost_months = [5, 6, 7, 8, 9]
+    results = []
+    for cy in crop_years_sorted:
+        if cy not in selected_crop_years:
+            continue
+        cy_df = df_r[df_r["crop_year"] == cy]
+        for month in frost_months:
+            m_df = cy_df[cy_df["month"] == month]
+            if m_df.empty:
+                continue
+            results.append({"crop_year": cy, "month": month,
+                             "frost_days": int((m_df["tmin_avg"] <= threshold).sum())})
+    if not results:
+        return go.Figure()
+    res = pd.DataFrame(results)
+    month_labels = {5: "May", 6: "Jun", 7: "Jul", 8: "Aug", 9: "Sep"}
+    res["month_label"] = res["month"].map(month_labels)
+    res["month_order"] = res["month"]
+    res = res.sort_values("month_order")
+    fig = go.Figure()
+    for cy in crop_years_sorted:
+        if cy not in selected_crop_years:
+            continue
+        cy_df = res[res["crop_year"] == cy]
+        if cy_df.empty:
+            continue
+        fig.add_trace(go.Bar(x=cy_df["month_label"], y=cy_df["frost_days"], name=cy,
+            marker_color=crop_year_colors.get(cy, INK_4), opacity=0.85,
+            hovertemplate=f"<b>{cy}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Frost Risk Days ({region}, TMIN <={threshold}°C)", "Days")
+    layout["barmode"] = "group"
+    layout["xaxis"]["categoryorder"] = "array"
+    layout["xaxis"]["categoryarray"] = ["May", "Jun", "Jul", "Aug", "Sep"]
+    layout["legend"]["title"]["text"] = "Crop Year"
+    fig.update_layout(**layout)
+    return fig
+
+
+def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=3.0):
+    """Calendar-year frost risk days per month (for non-Brazil origins with TMIN data)."""
+    if "tmin_avg" not in daily_avg_temp.columns:
+        return go.Figure()
+    df = daily_avg_temp[daily_avg_temp["region"] == region].copy()
+    df = df[df["year"] != "Normal (Maxar)"].copy()
+    if df["tmin_avg"].isna().all():
+        return go.Figure()
+    df["full_date"] = pd.to_datetime(df["year"].astype(str) + "-" + df["date"], errors="coerce")
+    df = df[df["full_date"].notna()].copy()
+    df["month"] = df["full_date"].dt.month
+    results = []
+    for year in selected_years:
+        if year == "Normal (Maxar)":
+            continue
+        y_df = df[df["year"] == year]
+        for month in range(1, 13):
+            m_df = y_df[y_df["month"] == month]
+            if m_df.empty:
+                continue
+            results.append({"year": year, "month": month,
+                             "frost_days": int((m_df["tmin_avg"] <= threshold).sum())})
+    if not results:
+        return go.Figure()
+    res = pd.DataFrame(results)
+    res["month_label"] = res["month"].map(_MONTH_LABELS)
+    res = res.sort_values("month")
+    fig = go.Figure()
+    for year in selected_years:
+        if year == "Normal (Maxar)":
+            continue
+        y_df = res[res["year"] == year]
+        if y_df.empty:
+            continue
+        fig.add_trace(go.Bar(x=y_df["month_label"], y=y_df["frost_days"], name=year,
+            marker_color=ALL_YEAR_COLORS.get(year, INK_4), opacity=0.85,
+            hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>"))
+    layout = _base_layout(f"Frost Risk Days ({region}, TMIN <={threshold}°C)", "Days")
+    layout["barmode"] = "group"
+    layout["xaxis"]["categoryorder"] = "array"
+    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["legend"]["title"]["text"] = "Year"
     fig.update_layout(**layout)
     return fig
 
@@ -983,6 +1102,7 @@ def build_wet_days(daily_avg, region, selected_years, threshold=1.0):
 def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
     df = daily_avg_temp[daily_avg_temp["region"] == region].copy()
     df = df[df["year"] != "Normal (Maxar)"].copy()
+    temp_col = "tmax_avg" if "tmax_avg" in df.columns and df["tmax_avg"].notna().any() else "tavg_avg"
     df["full_date"] = pd.to_datetime(df["year"].astype(str) + "-" + df["date"], errors="coerce")
     df = df[df["full_date"].notna()].copy()
     df["month"] = df["full_date"].dt.month
@@ -996,7 +1116,7 @@ def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
             if m_df.empty:
                 continue
             results.append({"year": year, "month": month,
-                             "stress_days": int((m_df["tavg_avg"] > threshold).sum())})
+                             "stress_days": int((m_df[temp_col] > threshold).sum())})
     if not results:
         return go.Figure()
     res = pd.DataFrame(results)
@@ -1012,7 +1132,8 @@ def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
         fig.add_trace(go.Bar(x=y_df["month_label"], y=y_df["stress_days"], name=year,
             marker_color=ALL_YEAR_COLORS.get(year, INK_4), opacity=0.85,
             hovertemplate=f"<b>{year}</b>  %{{x}}  %{{y}} days<extra></extra>"))
-    layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C avg)", "Days")
+    temp_label = "max" if temp_col == "tmax_avg" else "avg"
+    layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C {temp_label})", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
     layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
@@ -1116,7 +1237,7 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
 
         with st.expander("Advanced Analytics", expanded=False):
             # Threshold inputs
-            th_col1, th_col2, th_col3 = st.columns(3)
+            th_col1, th_col2, th_col3, th_col4 = st.columns(4)
             with th_col1:
                 dry_threshold = st.number_input("Dry day threshold (mm)", min_value=0.0,
                     value=1.0, step=0.5, key=f"dry_thr_{origin_name}_{region}")
@@ -1125,7 +1246,10 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
                     value=1.0, step=0.5, key=f"wet_thr_{origin_name}_{region}")
             with th_col3:
                 heat_threshold = st.number_input("Heat stress threshold (°C)", min_value=20.0,
-                    max_value=45.0, value=30.0, step=0.5, key=f"heat_thr_{origin_name}_{region}")
+                    max_value=45.0, value=32.0, step=0.5, key=f"heat_thr_{origin_name}_{region}")
+            with th_col4:
+                frost_threshold = st.number_input("Frost risk TMIN (°C)", min_value=-10.0,
+                    max_value=10.0, value=3.0, step=0.5, key=f"frost_thr_{origin_name}_{region}")
 
             c_a, c_b = st.columns(2)
             with c_a:
@@ -1140,8 +1264,13 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
                 st.plotly_chart(build_wet_days(daily_avg, region, selected_years, wet_threshold),
                     use_container_width=True, key=f"wet_{origin_name}_{region}")
 
-            st.plotly_chart(build_heat_stress(daily_avg_temp, region, selected_years, heat_threshold),
-                use_container_width=True, key=f"heat_{origin_name}_{region}")
+            c_heat, c_frost = st.columns(2)
+            with c_heat:
+                st.plotly_chart(build_heat_stress(daily_avg_temp, region, selected_years, heat_threshold),
+                    use_container_width=True, key=f"heat_{origin_name}_{region}")
+            with c_frost:
+                st.plotly_chart(build_frost_risk_days_cal(daily_avg_temp, region, selected_years, frost_threshold),
+                    use_container_width=True, key=f"frost_{origin_name}_{region}")
 
 
 # -------------------------------------------------------
@@ -1303,7 +1432,7 @@ with tab_brazil:
 
                     with st.expander("Advanced Analytics", expanded=False):
                         # Threshold inputs
-                        th_col1, th_col2, th_col3 = st.columns(3)
+                        th_col1, th_col2, th_col3, th_col4 = st.columns(4)
                         with th_col1:
                             dry_thr = st.number_input("Dry threshold (mm)", min_value=0.0,
                                 value=1.0, step=0.5, key=f"bra_dry_thr_{region}")
@@ -1312,7 +1441,10 @@ with tab_brazil:
                                 value=1.0, step=0.5, key=f"bra_wet_thr_{region}")
                         with th_col3:
                             heat_thr = st.number_input("Heat stress threshold (°C)", min_value=20.0,
-                                max_value=45.0, value=28.0, step=0.5, key=f"bra_heat_thr_{region}")
+                                max_value=45.0, value=32.0, step=0.5, key=f"bra_heat_thr_{region}")
+                        with th_col4:
+                            frost_thr = st.number_input("Frost risk TMIN (°C)", min_value=-10.0,
+                                max_value=10.0, value=3.0, step=0.5, key=f"bra_frost_thr_{region}")
 
                         c_a, c_b = st.columns(2)
                         with c_a:
@@ -1335,10 +1467,17 @@ with tab_brazil:
                                 crop_year_colors, selected_crop_years, wet_thr),
                                 use_container_width=True, key=f"bra_wet_{region}")
 
-                        st.plotly_chart(build_brazil_heat_stress(
-                            real_daily_temp, region, crop_years_sorted,
-                            crop_year_colors, selected_crop_years, heat_thr),
-                            use_container_width=True, key=f"bra_heat_{region}")
+                        c_heat, c_frost = st.columns(2)
+                        with c_heat:
+                            st.plotly_chart(build_brazil_heat_stress(
+                                real_daily_temp, region, crop_years_sorted,
+                                crop_year_colors, selected_crop_years, heat_thr),
+                                use_container_width=True, key=f"bra_heat_{region}")
+                        with c_frost:
+                            st.plotly_chart(build_brazil_frost_risk_days(
+                                real_daily_temp, region, crop_years_sorted,
+                                crop_year_colors, selected_crop_years, frost_thr),
+                                use_container_width=True, key=f"bra_frost_{region}")
 
 # ---- CALENDAR-YEAR ORIGINS ----
 with tab_colombia:

@@ -120,54 +120,48 @@ def _fetch_station(station: str, parameter: str) -> list:
             if parameter == "PRCP":
                 rec["prcp"]     = d.get("prcp")
                 rec["prcp_sum"] = d.get("prcp_sum")
-            else:
+            elif parameter == "TAVG":
                 rec["tavg"] = d.get("tavg")
+            elif parameter == "TMIN":
+                rec["tmin"] = d.get("tmin")
+            else:
+                rec["tmax"] = d.get("tmax")
             records.append(rec)
     return records
 
 
 def _fetch_origin(origin_name: str, cfg: dict) -> pd.DataFrame:
-    """Fetch all stations for one origin, merge PRCP + TAVG into one DataFrame."""
+    """Fetch all stations for one origin — PRCP, TAVG, TMIN, TMAX."""
+    from functools import reduce
     station_region = cfg["stations"]
     stations       = list(station_region.keys())
-    prcp_rows, tavg_rows, errors = [], [], []
+    buckets        = {"PRCP": [], "TAVG": [], "TMIN": [], "TMAX": []}
+    errors         = []
 
-    tasks = [(s, p) for s in stations for p in ("PRCP", "TAVG")]
+    tasks = [(s, p) for s in stations for p in buckets]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(_fetch_station, s, p): (s, p) for s, p in tasks}
         for fut in as_completed(futures):
             stn, param = futures[fut]
             try:
-                rows = fut.result()
-                (prcp_rows if param == "PRCP" else tavg_rows).extend(rows)
+                buckets[param].extend(fut.result())
             except Exception as e:
                 errors.append(f"{stn}/{param}: {e}")
 
     if errors:
         print(f"  {len(errors)} error(s) (first 3): {errors[:3]}")
 
-    df_prcp = pd.DataFrame(prcp_rows)
-    df_tavg = pd.DataFrame(tavg_rows)
-
-    if df_prcp.empty and df_tavg.empty:
+    frames = {p: pd.DataFrame(rows) for p, rows in buckets.items() if rows}
+    if not frames:
         return pd.DataFrame()
 
-    if df_prcp.empty:
-        df = df_tavg.copy()
-        df["prcp"] = pd.NA
-        df["prcp_sum"] = pd.NA
-    elif df_tavg.empty:
-        df = df_prcp.copy()
-        df["tavg"] = pd.NA
-    else:
-        df = df_prcp.merge(
-            df_tavg[["station", "year", "date", "tavg"]],
-            on=["station", "year", "date"],
-            how="outer",
-        )
-
+    df = reduce(lambda l, r: l.merge(r, on=["station", "year", "date"], how="outer"),
+                frames.values())
+    for col in ["prcp", "prcp_sum", "tavg", "tmin", "tmax"]:
+        if col not in df.columns:
+            df[col] = pd.NA
     df["region"] = df["station"].map(station_region)
-    return df[["station", "region", "year", "date", "prcp", "prcp_sum", "tavg"]]
+    return df[["station", "region", "year", "date", "prcp", "prcp_sum", "tavg", "tmin", "tmax"]]
 
 
 # -------------------------------------------------------
@@ -187,7 +181,7 @@ def main():
         out = PARQUET_DIR / cfg["file"]
         df.to_parquet(out, index=False)
         years_found = sorted(df["year"].unique())
-        print(f"  {len(df):,} rows saved → {cfg['file']}")
+        print(f"  {len(df):,} rows saved -> {cfg['file']}")
         print(f"  Years: {years_found}\n")
 
     print("Backfill complete.")

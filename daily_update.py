@@ -13,6 +13,7 @@ import requests
 import pandas as pd
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import reduce
 from pathlib import Path
 
 # -------------------------------------------------------
@@ -110,14 +111,18 @@ def _fetch_station(station: str, parameter: str) -> list:
             if parameter == "PRCP":
                 rec["prcp"]     = d.get("prcp")
                 rec["prcp_sum"] = d.get("prcp_sum")
-            else:
+            elif parameter == "TAVG":
                 rec["tavg"] = d.get("tavg")
+            elif parameter == "TMIN":
+                rec["tmin"] = d.get("tmin")
+            else:
+                rec["tmax"] = d.get("tmax")
             records.append(rec)
     return records
 
 
 def _update_origin(origin_name: str, cfg: dict):
-    """Fetch current year → drop old current-year rows → append → save."""
+    """Fetch current year -> drop old current-year rows -> append -> save."""
     parquet_path   = PARQUET_DIR / cfg["file"]
     station_region = cfg["stations"]
     stations       = list(station_region.keys())
@@ -126,44 +131,34 @@ def _update_origin(origin_name: str, cfg: dict):
         print(f"  Parquet not found. Run backfill.py first.")
         return
 
-    prcp_rows, tavg_rows, errors = [], [], []
-    tasks = [(s, p) for s in stations for p in ("PRCP", "TAVG")]
+    buckets = {"PRCP": [], "TAVG": [], "TMIN": [], "TMAX": []}
+    errors  = []
+    tasks   = [(s, p) for s in stations for p in buckets]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(_fetch_station, s, p): (s, p) for s, p in tasks}
         for fut in as_completed(futures):
             stn, param = futures[fut]
             try:
-                rows = fut.result()
-                (prcp_rows if param == "PRCP" else tavg_rows).extend(rows)
+                buckets[param].extend(fut.result())
             except Exception as e:
                 errors.append(f"{stn}/{param}: {e}")
 
     if errors:
         print(f"  {len(errors)} error(s): {errors[:3]}")
 
-    df_prcp = pd.DataFrame(prcp_rows)
-    df_tavg = pd.DataFrame(tavg_rows)
-
-    if df_prcp.empty and df_tavg.empty:
+    frames = {p: pd.DataFrame(rows) for p, rows in buckets.items() if rows}
+    if not frames:
         print(f"  No data returned for {CURRENT_YEAR}.")
         return
 
-    if df_prcp.empty:
-        new_df = df_tavg.copy()
-        new_df["prcp"] = pd.NA
-        new_df["prcp_sum"] = pd.NA
-    elif df_tavg.empty:
-        new_df = df_prcp.copy()
-        new_df["tavg"] = pd.NA
-    else:
-        new_df = df_prcp.merge(
-            df_tavg[["station", "year", "date", "tavg"]],
-            on=["station", "year", "date"],
-            how="outer",
-        )
+    new_df = reduce(lambda l, r: l.merge(r, on=["station", "year", "date"], how="outer"),
+                    frames.values())
+    for col in ["prcp", "prcp_sum", "tavg", "tmin", "tmax"]:
+        if col not in new_df.columns:
+            new_df[col] = pd.NA
 
     new_df["region"] = new_df["station"].map(station_region)
-    new_df = new_df[["station", "region", "year", "date", "prcp", "prcp_sum", "tavg"]]
+    new_df = new_df[["station", "region", "year", "date", "prcp", "prcp_sum", "tavg", "tmin", "tmax"]]
 
     # Load existing, remove stale current-year rows, append fresh data
     existing = pd.read_parquet(parquet_path)
@@ -171,7 +166,7 @@ def _update_origin(origin_name: str, cfg: dict):
     updated  = pd.concat([existing, new_df], ignore_index=True)
     updated.to_parquet(parquet_path, index=False)
 
-    print(f"  {len(new_df):,} rows updated for {CURRENT_YEAR} → {cfg['file']}")
+    print(f"  {len(new_df):,} rows updated for {CURRENT_YEAR} -> {cfg['file']}")
 
 
 # -------------------------------------------------------
@@ -179,7 +174,7 @@ def _update_origin(origin_name: str, cfg: dict):
 # -------------------------------------------------------
 def main():
     today = datetime.date.today()
-    print(f"Daily update — {today}  (refreshing year {CURRENT_YEAR})\n")
+    print(f"Daily update -- {today}  (refreshing year {CURRENT_YEAR})\n")
     for origin_name, cfg in ORIGINS.items():
         print(f"[{origin_name}]")
         _update_origin(origin_name, cfg)
