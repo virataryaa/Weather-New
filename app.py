@@ -1,3 +1,4 @@
+import calendar as _cal_module
 import streamlit as st
 import pandas as pd
 import duckdb
@@ -144,7 +145,7 @@ def process_temperature(raw_df: pd.DataFrame, today: pd.Timestamp):
 
 
 @st.cache_data(show_spinner=False)
-def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
+def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp, sm: int = 1):
     df = daily_avg.copy()
     df["full_date"] = pd.to_datetime(df["full_date"])
     df = df[df["date"] != "02-29"].copy().reset_index(drop=True)
@@ -168,7 +169,7 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
         n_parts.append(grp)
     agg_normals = pd.concat(n_parts, ignore_index=True) if n_parts else agg_normals.assign(prcp_avg_30d_sum=pd.NA)
     agg_normals["xdate"] = agg_normals["rolling_date"].apply(
-        lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
+        lambda d: pd.Timestamp(2000 if d.month >= sm else 2001, d.month, d.day)
     )
     agg_normals_final = agg_normals[agg_normals["rolling_date"].dt.year != 1949].reset_index(drop=True)
     other_df  = df[df["year"] != "Normal (Maxar)"].copy()
@@ -182,7 +183,7 @@ def process_rolling(daily_avg: pd.DataFrame, today: pd.Timestamp):
         o_parts.append(grp)
     agg_other = pd.concat(o_parts, ignore_index=True) if o_parts else agg_other.assign(prcp_avg_30d_sum=pd.NA)
     agg_other["xdate"] = agg_other["rolling_date"].apply(
-        lambda d: pd.Timestamp(year=2026, month=d.month, day=d.day)
+        lambda d: pd.Timestamp(2000 if d.month >= sm else 2001, d.month, d.day)
     )
     return (
         pd.concat([agg_other, agg_normals_final], ignore_index=True)
@@ -350,7 +351,7 @@ def compute_brazil_temp_avg(real_daily_temp: pd.DataFrame, n: int, crop_years_so
     return avg_df
 
 
-def compute_cal_precip_avg(daily_avg_full: pd.DataFrame, n: int):
+def compute_cal_precip_avg(daily_avg_full: pd.DataFrame, n: int, sm: int = 1):
     real_years = sorted([y for y in daily_avg_full["year"].unique() if y != "Normal (Maxar)"])
     avg_years  = real_years[-n:] if len(real_years) >= n else real_years
     avg_df = (
@@ -358,7 +359,9 @@ def compute_cal_precip_avg(daily_avg_full: pd.DataFrame, n: int):
         .groupby(["region", "date"], as_index=False)
         .agg(prcp_sum_avg=("prcp_sum_avg", "mean"), prcp_avg=("prcp_avg", "mean"))
     )
-    avg_df["_px"] = pd.to_datetime("2001-" + avg_df["date"])
+    avg_df["_px"] = avg_df["date"].apply(
+        lambda d: pd.to_datetime(f"{'2000' if int(d[:2]) >= sm else '2001'}-{d}")
+    )
     return avg_df
 
 
@@ -373,7 +376,7 @@ def compute_cal_rolling_avg(agg_df_full: pd.DataFrame, n: int):
     return avg_df
 
 
-def compute_cal_temp_avg(daily_avg_temp_full: pd.DataFrame, n: int):
+def compute_cal_temp_avg(daily_avg_temp_full: pd.DataFrame, n: int, sm: int = 1):
     real_years = sorted([y for y in daily_avg_temp_full["year"].unique() if y != "Normal (Maxar)"])
     avg_years  = real_years[-n:] if len(real_years) >= n else real_years
     avg_df = (
@@ -381,7 +384,9 @@ def compute_cal_temp_avg(daily_avg_temp_full: pd.DataFrame, n: int):
         .groupby(["region", "date"], as_index=False)
         .agg(tavg_avg=("tavg_avg", "mean"))
     )
-    avg_df["_px"] = pd.to_datetime("2001-" + avg_df["date"])
+    avg_df["_px"] = avg_df["date"].apply(
+        lambda d: pd.to_datetime(f"{'2000' if int(d[:2]) >= sm else '2001'}-{d}")
+    )
     return avg_df
 
 
@@ -408,12 +413,25 @@ def _base_layout(title: str, y_title: str, height: int = 420) -> dict:
         margin=dict(l=60, r=20, t=50, b=55),
     )
 
-_DT_XAXIS_CAL = dict(
-    tickformat="%b", dtick="M1", tick0="2001-01-01",
-    range=["2001-01-01", "2001-12-31"],
-    gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
-    linecolor=BORDER, zerolinecolor=BORDER,
-)
+def _dt_xaxis_cal(sm=1):
+    start = f"2000-{sm:02d}-01"
+    if sm == 1:
+        end = "2000-12-31"
+    else:
+        end_m  = sm - 1
+        last_d = _cal_module.monthrange(2001, end_m)[1]
+        end    = f"2001-{end_m:02d}-{last_d:02d}"
+    return dict(tickformat="%b", dtick="M1", tick0=start, range=[start, end],
+                gridcolor=GRID, tickfont=dict(size=11, color=INK_3),
+                linecolor=BORDER, zerolinecolor=BORDER)
+
+
+def _cal_month_order(sm=1):
+    return list(range(sm, 13)) + list(range(1, sm))
+
+
+def _cal_month_labels(sm=1):
+    return [_MONTH_LABELS[m] for m in _cal_month_order(sm)]
 _MONTH_NAMES_LIST = ["January","February","March","April","May","June",
                      "July","August","September","October","November","December"]
 _MNUM_MAP = {n: i+1 for i, n in enumerate(_MONTH_NAMES_LIST)}
@@ -453,10 +471,12 @@ _BOX_EXPLANATION = (
 )
 
 
-def _add_year_traces(fig, df_year, year, y_col, hover_unit, year_colors):
+def _add_year_traces(fig, df_year, year, y_col, hover_unit, year_colors, sm=1):
     color    = year_colors.get(year, INK_4)
     df_all   = df_year.copy()
-    df_all["_px"] = pd.to_datetime("2001-" + df_all["date"])
+    df_all["_px"] = df_all["date"].apply(
+        lambda d: pd.to_datetime(f"{'2000' if int(d[:2]) >= sm else '2001'}-{d}")
+    )
     df_all   = df_all.sort_values("_px")
     realized = df_all[df_all["tag"] == "realized"]
     forecast = df_all[df_all["tag"] == "forecast"]
@@ -481,11 +501,11 @@ def _add_year_traces(fig, df_year, year, y_col, hover_unit, year_colors):
 # -------------------------------------------------------
 # CALENDAR-YEAR CHART BUILDERS
 # -------------------------------------------------------
-def build_cumulative_precip(daily_avg, region, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
+def build_cumulative_precip(daily_avg, region, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR, sm=1):
     df_r = daily_avg[daily_avg["region"] == region].copy()
     fig  = go.Figure()
     for year in sorted(df_r["year"].unique()):
-        _add_year_traces(fig, df_r[df_r["year"] == year], year, "prcp_sum_avg", "mm", year_colors)
+        _add_year_traces(fig, df_r[df_r["year"] == year], year, "prcp_sum_avg", "mm", year_colors, sm)
     if avg_df is not None:
         d = avg_df[avg_df["region"] == region].sort_values("_px")
         if not d.empty:
@@ -495,12 +515,12 @@ def build_cumulative_precip(daily_avg, region, year_colors, avg_df=None, avg_lab
                 hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
             ))
     layout = _base_layout(f"Cumulative Precipitation  —  {region}", "mm")
-    layout["xaxis"] = _DT_XAXIS_CAL.copy()
+    layout["xaxis"] = _dt_xaxis_cal(sm)
     fig.update_layout(**layout)
     return fig
 
 
-def build_temperature(daily_avg_temp, region, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
+def build_temperature(daily_avg_temp, region, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR, sm=1):
     df_r      = daily_avg_temp[daily_avg_temp["region"] == region].copy()
     real_years = [y for y in df_r["year"].unique() if y != "Normal (Maxar)"]
     df_minmax  = (
@@ -508,7 +528,9 @@ def build_temperature(daily_avg_temp, region, year_colors, avg_df=None, avg_labe
         .groupby("date", as_index=False)
         .agg(tavg_min=("tavg_avg", "min"), tavg_max=("tavg_avg", "max"))
     )
-    df_minmax["_px"] = pd.to_datetime("2001-" + df_minmax["date"])
+    df_minmax["_px"] = df_minmax["date"].apply(
+        lambda d: pd.to_datetime(f"{'2000' if int(d[:2]) >= sm else '2001'}-{d}")
+    )
     df_minmax = df_minmax.sort_values("_px")
     fig = go.Figure()
     if not df_minmax.empty:
@@ -519,7 +541,7 @@ def build_temperature(daily_avg_temp, region, year_colors, avg_df=None, avg_labe
             line=dict(color="rgba(0,0,0,0)"), name="Hist. Range", hoverinfo="skip",
         ))
     for year in sorted(df_r["year"].unique()):
-        _add_year_traces(fig, df_r[df_r["year"] == year], year, "tavg_avg", "°C", year_colors)
+        _add_year_traces(fig, df_r[df_r["year"] == year], year, "tavg_avg", "°C", year_colors, sm)
     if avg_df is not None:
         d = avg_df[avg_df["region"] == region].sort_values("_px")
         if not d.empty:
@@ -529,15 +551,16 @@ def build_temperature(daily_avg_temp, region, year_colors, avg_df=None, avg_labe
                 hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} C<extra></extra>",
             ))
     layout = _base_layout(f"Average Temperature  —  {region}", "°C")
-    layout["xaxis"] = _DT_XAXIS_CAL.copy()
+    layout["xaxis"] = _dt_xaxis_cal(sm)
     fig.update_layout(**layout)
     return fig
 
 
-def build_rolling_precip(agg_df, region, today, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR):
-    latest_yr = str(agg_df[agg_df["year"] != "Normal (Maxar)"]["year"].astype(str).max())
-    df_r = agg_df[agg_df["region"] == region].copy()
-    df_r = df_r[~((df_r["year"] == latest_yr) & (df_r["xdate"] > today))]
+def build_rolling_precip(agg_df, region, today, year_colors, avg_df=None, avg_label="", avg_color=AVG_5Y_COLOR, sm=1):
+    latest_yr   = str(agg_df[agg_df["year"] != "Normal (Maxar)"]["year"].astype(str).max())
+    df_r        = agg_df[agg_df["region"] == region].copy()
+    today_xdate = pd.Timestamp(2000 if today.month >= sm else 2001, today.month, today.day)
+    df_r = df_r[~((df_r["year"] == latest_yr) & (df_r["xdate"] > today_xdate))]
     fig  = go.Figure()
     for year in sorted(df_r["year"].unique()):
         df_y = df_r[df_r["year"] == year].sort_values("xdate")
@@ -555,7 +578,7 @@ def build_rolling_precip(agg_df, region, today, year_colors, avg_df=None, avg_la
                 hovertemplate=f"<b>{avg_label}</b>  %{{x|%b %d}}  %{{y:.1f}} mm<extra></extra>",
             ))
     layout = _base_layout(f"30-Day Rolling Precipitation  —  {region}", "Rolling Sum (mm)")
-    layout["xaxis"].update(tickformat="%b", dtick="M1")
+    layout["xaxis"] = _dt_xaxis_cal(sm)
     fig.update_layout(**layout)
     return fig
 
@@ -916,7 +939,7 @@ def build_brazil_frost_risk_days(real_daily_temp, region, crop_years_sorted, cro
     return fig
 
 
-def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=3.0):
+def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=3.0, sm=1):
     """Calendar-year frost risk days per month (for non-Brazil origins with TMIN data)."""
     if "tmin_avg" not in daily_avg_temp.columns:
         return go.Figure()
@@ -927,12 +950,14 @@ def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=
     df["full_date"] = pd.to_datetime(df["year"].astype(str) + "-" + df["date"], errors="coerce")
     df = df[df["full_date"].notna()].copy()
     df["month"] = df["full_date"].dt.month
+    mo = _cal_month_order(sm)
+    mo_map = {m: i for i, m in enumerate(mo)}
     results = []
     for year in selected_years:
         if year == "Normal (Maxar)":
             continue
         y_df = df[df["year"] == year]
-        for month in range(1, 13):
+        for month in mo:
             m_df = y_df[y_df["month"] == month]
             if m_df.empty:
                 continue
@@ -942,7 +967,8 @@ def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res = res.sort_values("month")
+    res["month_order"] = res["month"].map(mo_map)
+    res = res.sort_values("month_order")
     fig = go.Figure()
     for year in selected_years:
         if year == "Normal (Maxar)":
@@ -956,7 +982,7 @@ def build_frost_risk_days_cal(daily_avg_temp, region, selected_years, threshold=
     layout = _base_layout(f"Frost Risk Days ({region}, TMIN <={threshold}°C)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = _cal_month_labels(sm)
     layout["legend"]["title"]["text"] = "Year"
     fig.update_layout(**layout)
     return fig
@@ -1002,7 +1028,7 @@ def build_brazil_monthly_boxplot(real_daily, normals_daily, region, crop_years_s
 # -------------------------------------------------------
 # ADVANCED ANALYTICS — CALENDAR YEAR
 # -------------------------------------------------------
-def build_precip_anomaly(daily_avg, region, selected_years):
+def build_precip_anomaly(daily_avg, region, selected_years, sm=1):
     df = daily_avg[daily_avg["region"] == region].copy()
     df["month"] = df["full_date"].dt.month
     normals_m = (df[df["year"] == "Normal (Maxar)"].groupby("month")["prcp_avg"].sum()
@@ -1012,7 +1038,9 @@ def build_precip_anomaly(daily_avg, region, selected_years):
     merged = real_m.merge(normals_m, on="month")
     merged["anomaly"]     = merged["real_sum"] - merged["normal_sum"]
     merged["month_label"] = merged["month"].map(_MONTH_LABELS)
-    merged = merged.sort_values("month")
+    mo_map = {m: i for i, m in enumerate(_cal_month_order(sm))}
+    merged["month_order"] = merged["month"].map(mo_map)
+    merged = merged.sort_values("month_order")
     fig = go.Figure()
     for year in selected_years:
         if year == "Normal (Maxar)":
@@ -1027,21 +1055,23 @@ def build_precip_anomaly(daily_avg, region, selected_years):
     layout = _base_layout(f"Monthly Precipitation Anomaly vs Normal (Maxar) ({region})", "mm above/below normal")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = _cal_month_labels(sm)
     layout["legend"]["title"]["text"] = "Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_dry_days(daily_avg, region, selected_years, threshold=1.0):
+def build_dry_days(daily_avg, region, selected_years, threshold=1.0, sm=1):
     df = daily_avg[(daily_avg["region"] == region) & (daily_avg["year"] != "Normal (Maxar)")].copy()
     df["month"] = df["full_date"].dt.month
+    mo = _cal_month_order(sm)
+    mo_map = {m: i for i, m in enumerate(mo)}
     results = []
     for year in selected_years:
         if year == "Normal (Maxar)":
             continue
         y_df = df[df["year"] == year].sort_values("full_date")
-        for month in range(1, 13):
+        for month in mo:
             m_df = y_df[y_df["month"] == month]
             if m_df.empty:
                 continue
@@ -1054,7 +1084,8 @@ def build_dry_days(daily_avg, region, selected_years, threshold=1.0):
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res = res.sort_values("month")
+    res["month_order"] = res["month"].map(mo_map)
+    res = res.sort_values("month_order")
     fig = go.Figure()
     for year in selected_years:
         if year == "Normal (Maxar)":
@@ -1068,21 +1099,23 @@ def build_dry_days(daily_avg, region, selected_years, threshold=1.0):
     layout = _base_layout(f"Max Consecutive Dry Days ({region}, <{threshold} mm/day)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = _cal_month_labels(sm)
     layout["legend"]["title"]["text"] = "Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_wet_days(daily_avg, region, selected_years, threshold=1.0):
+def build_wet_days(daily_avg, region, selected_years, threshold=1.0, sm=1):
     df = daily_avg[(daily_avg["region"] == region) & (daily_avg["year"] != "Normal (Maxar)")].copy()
     df["month"] = df["full_date"].dt.month
+    mo = _cal_month_order(sm)
+    mo_map = {m: i for i, m in enumerate(mo)}
     results = []
     for year in selected_years:
         if year == "Normal (Maxar)":
             continue
         y_df = df[df["year"] == year].sort_values("full_date")
-        for month in range(1, 13):
+        for month in mo:
             m_df = y_df[y_df["month"] == month]
             if m_df.empty:
                 continue
@@ -1095,7 +1128,8 @@ def build_wet_days(daily_avg, region, selected_years, threshold=1.0):
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res = res.sort_values("month")
+    res["month_order"] = res["month"].map(mo_map)
+    res = res.sort_values("month_order")
     fig = go.Figure()
     for year in selected_years:
         if year == "Normal (Maxar)":
@@ -1109,25 +1143,27 @@ def build_wet_days(daily_avg, region, selected_years, threshold=1.0):
     layout = _base_layout(f"Max Consecutive Wet Days ({region}, >={threshold} mm/day)", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = _cal_month_labels(sm)
     layout["legend"]["title"]["text"] = "Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
+def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0, sm=1):
     df = daily_avg_temp[daily_avg_temp["region"] == region].copy()
     df = df[df["year"] != "Normal (Maxar)"].copy()
     temp_col = "tmax_avg" if "tmax_avg" in df.columns and df["tmax_avg"].notna().any() else "tavg_avg"
     df["full_date"] = pd.to_datetime(df["year"].astype(str) + "-" + df["date"], errors="coerce")
     df = df[df["full_date"].notna()].copy()
     df["month"] = df["full_date"].dt.month
+    mo = _cal_month_order(sm)
+    mo_map = {m: i for i, m in enumerate(mo)}
     results = []
     for year in selected_years:
         if year == "Normal (Maxar)":
             continue
         y_df = df[df["year"] == year]
-        for month in range(1, 13):
+        for month in mo:
             m_df = y_df[y_df["month"] == month]
             if m_df.empty:
                 continue
@@ -1137,7 +1173,8 @@ def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
         return go.Figure()
     res = pd.DataFrame(results)
     res["month_label"] = res["month"].map(_MONTH_LABELS)
-    res = res.sort_values("month")
+    res["month_order"] = res["month"].map(mo_map)
+    res = res.sort_values("month_order")
     fig = go.Figure()
     for year in selected_years:
         if year == "Normal (Maxar)":
@@ -1152,21 +1189,24 @@ def build_heat_stress(daily_avg_temp, region, selected_years, threshold=30.0):
     layout = _base_layout(f"Heat Stress Days ({region}, >{threshold}°C {temp_label})", "Days")
     layout["barmode"] = "group"
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = _cal_month_labels(sm)
     layout["legend"]["title"]["text"] = "Year"
     fig.update_layout(**layout)
     return fig
 
 
-def build_monthly_boxplot(daily_avg, region, selected_years):
+def build_monthly_boxplot(daily_avg, region, selected_years, sm=1):
     df = daily_avg[daily_avg["region"] == region].copy()
     df["month"] = df["full_date"].dt.month
     monthly   = df[df["year"] != "Normal (Maxar)"].groupby(["year", "month"])["prcp_avg"].sum().reset_index()
     normals_m = df[df["year"] == "Normal (Maxar)"].groupby("month")["prcp_avg"].sum().reset_index()
     monthly["month_label"]   = monthly["month"].map(_MONTH_LABELS)
     normals_m["month_label"] = normals_m["month"].map(_MONTH_LABELS)
-    monthly   = monthly.sort_values("month")
-    normals_m = normals_m.sort_values("month")
+    mo_map = {m: i for i, m in enumerate(_cal_month_order(sm))}
+    monthly["month_order"]   = monthly["month"].map(mo_map)
+    normals_m["month_order"] = normals_m["month"].map(mo_map)
+    monthly   = monthly.sort_values("month_order")
+    normals_m = normals_m.sort_values("month_order")
     latest_year = str(df[df["year"] != "Normal (Maxar)"]["year"].astype(str).max())
     fig = go.Figure()
     fig.add_trace(go.Box(x=monthly["month_label"], y=monthly["prcp_avg"],
@@ -1185,7 +1225,7 @@ def build_monthly_boxplot(daily_avg, region, selected_years):
         hovertemplate="<b>Normal (Maxar)</b>  %{x}  %{y:.1f} mm<extra></extra>"))
     layout = _base_layout(f"Monthly Precipitation Distribution ({region})", "mm")
     layout["xaxis"]["categoryorder"] = "array"
-    layout["xaxis"]["categoryarray"] = _CAL_MONTH_LABELS
+    layout["xaxis"]["categoryarray"] = _cal_month_labels(sm)
     layout["legend"]["title"]["text"] = "Series"
     fig.update_layout(**layout)
     return fig
@@ -1194,7 +1234,7 @@ def build_monthly_boxplot(daily_avg, region, selected_years):
 # -------------------------------------------------------
 # HELPER: render a full calendar-year origin tab
 # -------------------------------------------------------
-def render_calendar_tab(origin_name, selected_years, today, avg_option):
+def render_calendar_tab(origin_name, selected_years, today, avg_option, sm=1):
     c1, c2 = st.columns(2)
     with c1:
         with st.spinner(f"Loading {origin_name} precipitation..."):
@@ -1210,7 +1250,7 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
     # Process full datasets (needed for avg computation)
     daily_avg_full      = process_precipitation(raw_prcp, today)
     daily_avg_temp_full = process_temperature(raw_temp, today)
-    agg_df_full         = process_rolling(daily_avg_full, today)
+    agg_df_full         = process_rolling(daily_avg_full, today, sm)
 
     # Compute averages from full unfiltered data
     avg_cum_df = avg_roll_df = avg_temp_df = None
@@ -1220,9 +1260,9 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
         n         = 5 if "5" in avg_option else 10
         avg_color = AVG_5Y_COLOR if n == 5 else AVG_10Y_COLOR
         avg_label = f"{n}Y Avg"
-        avg_cum_df  = compute_cal_precip_avg(daily_avg_full, n)
+        avg_cum_df  = compute_cal_precip_avg(daily_avg_full, n, sm)
         avg_roll_df = compute_cal_rolling_avg(agg_df_full, n)
-        avg_temp_df = compute_cal_temp_avg(daily_avg_temp_full, n)
+        avg_temp_df = compute_cal_temp_avg(daily_avg_temp_full, n, sm)
 
     # Filter for display
     daily_avg      = daily_avg_full[daily_avg_full["year"].isin(selected_years)]
@@ -1236,19 +1276,19 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
         st.markdown(f"<h2 class='section-header'>Cumulative Precipitation &nbsp;—&nbsp; {region}</h2>",
                     unsafe_allow_html=True)
         st.plotly_chart(build_cumulative_precip(daily_avg, region, active_colors,
-                        avg_cum_df, avg_label, avg_color),
+                        avg_cum_df, avg_label, avg_color, sm),
                         use_container_width=True, key=f"cum_{origin_name}_{region}")
 
         st.markdown(f"<h2 class='section-header'>Temperature &nbsp;—&nbsp; {region}</h2>",
                     unsafe_allow_html=True)
         st.plotly_chart(build_temperature(daily_avg_temp, region, active_colors,
-                        avg_temp_df, avg_label, avg_color),
+                        avg_temp_df, avg_label, avg_color, sm),
                         use_container_width=True, key=f"tmp_{origin_name}_{region}")
 
         st.markdown(f"<h2 class='section-header'>30-Day Rolling Precipitation &nbsp;—&nbsp; {region}</h2>",
                     unsafe_allow_html=True)
         st.plotly_chart(build_rolling_precip(agg_df, region, today, active_colors,
-                        avg_roll_df, avg_label, avg_color),
+                        avg_roll_df, avg_label, avg_color, sm),
                         use_container_width=True, key=f"rol_{origin_name}_{region}")
 
         with st.expander("Advanced Analytics", expanded=False):
@@ -1269,23 +1309,23 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option):
 
             c_a, c_b = st.columns(2)
             with c_a:
-                st.plotly_chart(build_precip_anomaly(daily_avg, region, selected_years),
+                st.plotly_chart(build_precip_anomaly(daily_avg, region, selected_years, sm),
                     use_container_width=True, key=f"anom_{origin_name}_{region}")
-                st.plotly_chart(build_dry_days(daily_avg, region, selected_years, dry_threshold),
+                st.plotly_chart(build_dry_days(daily_avg, region, selected_years, dry_threshold, sm),
                     use_container_width=True, key=f"dry_{origin_name}_{region}")
             with c_b:
-                st.plotly_chart(build_monthly_boxplot(daily_avg, region, selected_years),
+                st.plotly_chart(build_monthly_boxplot(daily_avg, region, selected_years, sm),
                     use_container_width=True, key=f"box_{origin_name}_{region}")
                 st.markdown(_BOX_EXPLANATION, unsafe_allow_html=True)
-                st.plotly_chart(build_wet_days(daily_avg, region, selected_years, wet_threshold),
+                st.plotly_chart(build_wet_days(daily_avg, region, selected_years, wet_threshold, sm),
                     use_container_width=True, key=f"wet_{origin_name}_{region}")
 
             c_heat, c_frost = st.columns(2)
             with c_heat:
-                st.plotly_chart(build_heat_stress(daily_avg_temp, region, selected_years, heat_threshold),
+                st.plotly_chart(build_heat_stress(daily_avg_temp, region, selected_years, heat_threshold, sm),
                     use_container_width=True, key=f"heat_{origin_name}_{region}")
             with c_frost:
-                st.plotly_chart(build_frost_risk_days_cal(daily_avg_temp, region, selected_years, frost_threshold),
+                st.plotly_chart(build_frost_risk_days_cal(daily_avg_temp, region, selected_years, frost_threshold, sm),
                     use_container_width=True, key=f"frost_{origin_name}_{region}")
 
 
@@ -1315,6 +1355,17 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     sm = _MNUM_MAP[crop_start_name]
+
+    st.markdown(
+        f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
+        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Calendar Origin Start</p>",
+        unsafe_allow_html=True,
+    )
+    cal_start_name = st.selectbox(
+        "Calendar Crop Start Month", _MONTH_NAMES_LIST, index=0,   # January default
+        label_visibility="collapsed",
+    )
+    sm_cal = _MNUM_MAP[cal_start_name]
 
     st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
                 unsafe_allow_html=True)
@@ -1510,13 +1561,13 @@ with tab_brazil:
 
 # ---- CALENDAR-YEAR ORIGINS ----
 with tab_colombia:
-    render_calendar_tab("Colombia", selected_years, today, avg_option)
+    render_calendar_tab("Colombia", selected_years, today, avg_option, sm_cal)
 
 with tab_honduras:
-    render_calendar_tab("Honduras", selected_years, today, avg_option)
+    render_calendar_tab("Honduras", selected_years, today, avg_option, sm_cal)
 
 with tab_super4:
-    render_calendar_tab("Super 4", selected_years, today, avg_option)
+    render_calendar_tab("Super 4", selected_years, today, avg_option, sm_cal)
 
 with tab_vietnam:
-    render_calendar_tab("Vietnam", selected_years, today, avg_option)
+    render_calendar_tab("Vietnam", selected_years, today, avg_option, sm_cal)
