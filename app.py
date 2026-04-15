@@ -93,7 +93,7 @@ def load_origin_data(origin_name: str, parameter: str) -> pd.DataFrame:
 # PROCESSING — CALENDAR YEAR
 # -------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def process_precipitation(raw_df: pd.DataFrame, today: pd.Timestamp):
+def process_precipitation(raw_df: pd.DataFrame, today: pd.Timestamp, sm: int = 1):
     df = raw_df[raw_df["date"] != "02-29"].copy().reset_index(drop=True)
     latest_year = df[df["year"] != "Normal (Maxar)"]["year"].astype(int).max()
     df["full_date"] = pd.to_datetime(df.apply(
@@ -117,6 +117,13 @@ def process_precipitation(raw_df: pd.DataFrame, today: pd.Timestamp):
         lambda r: "realized" if r["year"] == "Normal (Maxar)" or r["full_date"] <= today else "forecast",
         axis=1,
     )
+    # Recompute cumulative in crop-year order when start month != January
+    if sm != 1:
+        mo_rank = {m: i for i, m in enumerate(list(range(sm, 13)) + list(range(1, sm)))}
+        daily_avg["_ord"] = daily_avg["date"].str[:2].astype(int).map(mo_rank)
+        daily_avg = daily_avg.sort_values(["region", "year", "_ord"]).reset_index(drop=True)
+        daily_avg["prcp_sum_avg"] = daily_avg.groupby(["region", "year"])["prcp_avg"].cumsum()
+        daily_avg = daily_avg.drop(columns=["_ord"])
     return daily_avg
 
 
@@ -1248,7 +1255,7 @@ def render_calendar_tab(origin_name, selected_years, today, avg_option, sm=1):
         return
 
     # Process full datasets (needed for avg computation)
-    daily_avg_full      = process_precipitation(raw_prcp, today)
+    daily_avg_full      = process_precipitation(raw_prcp, today, sm)
     daily_avg_temp_full = process_temperature(raw_temp, today)
     agg_df_full         = process_rolling(daily_avg_full, today, sm)
 
