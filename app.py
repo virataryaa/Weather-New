@@ -1228,13 +1228,15 @@ def build_frost_risk_days_cal(real_daily_temp, region, cys_sorted, cy_colors, se
 # -------------------------------------------------------
 # RENDER CALENDAR-YEAR ORIGIN TAB  (Cocoa-style)
 # -------------------------------------------------------
-def render_cal_tab(origin_name, today, avg_option, sm):
+def render_cal_tab(origin_name, today, avg_option, default_sm=1):
     if not st.session_state.get(f"loaded_{origin_name}", False):
         st.info(f"Click below to load {origin_name} weather data.")
         if st.button(f"Load {origin_name} Data", key=f"btn_{origin_name}"):
             st.session_state[f"loaded_{origin_name}"] = True
             st.rerun()
         return
+
+    sm = _MNUM_MAP[st.session_state.get(f"sm_{origin_name}", _MONTH_NAMES_LIST[default_sm - 1])]
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1267,7 +1269,11 @@ def render_cal_tab(origin_name, today, avg_option, sm):
         if not real_daily_temp.empty:
             avg_temp = compute_temp_avg(real_daily_temp, n, cys_sorted)
 
-    fc1, fc2 = st.columns(2)
+    fc0, fc1, fc2 = st.columns([1, 2, 2])
+    with fc0:
+        sm_name = st.selectbox("Start Month", _MONTH_NAMES_LIST,
+                               index=default_sm - 1, key=f"sm_{origin_name}")
+        sm = _MNUM_MAP[sm_name]
     with fc1:
         regions_all = sorted(real_daily["region"].unique())
         sel_regions = st.multiselect("Sub-Regions", options=regions_all, default=regions_all,
@@ -1361,19 +1367,6 @@ today = pd.Timestamp.today().normalize()
 
 # ---------- SIDEBAR ----------
 with st.sidebar:
-    st.markdown(
-        f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
-        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Start Month</p>",
-        unsafe_allow_html=True,
-    )
-    crop_start_name = st.selectbox(
-        "Start Month", _MONTH_NAMES_LIST, index=3,   # April default
-        label_visibility="collapsed",
-    )
-    sm = _MNUM_MAP[crop_start_name]
-
-    st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
-                unsafe_allow_html=True)
     st.markdown(f"<hr style='border:none;border-top:1px solid {BORDER};margin:.8rem 0'>",
                 unsafe_allow_html=True)
     st.markdown(
@@ -1419,13 +1412,14 @@ tab_brazil, tab_colombia, tab_honduras, tab_super4, tab_vietnam = st.tabs([
 
 # ---- BRAZIL ----
 with tab_brazil:
-    sm = 9  # September crop year for Brazil
     if not st.session_state.get("brazil_loaded", False):
         st.info("Click below to load Brazil weather data.")
         if st.button("Load Brazil Data", key="load_brazil"):
             st.session_state.brazil_loaded = True
             st.rerun()
     else:
+        sm = _MNUM_MAP[st.session_state.get("brazil_sm", _MONTH_NAMES_LIST[8])]
+
         c1, c2 = st.columns(2)
         with c1:
             with st.spinner("Loading Brazil precipitation..."):
@@ -1460,7 +1454,11 @@ with tab_brazil:
                     avg_temp_df = compute_brazil_temp_avg(real_daily_temp, n, crop_years_sorted)
 
             # Filters row
-            filter_col1, filter_col2 = st.columns(2)
+            filter_col0, filter_col1, filter_col2 = st.columns([1, 2, 2])
+            with filter_col0:
+                bra_sm_name = st.selectbox("Start Month", _MONTH_NAMES_LIST,
+                                           index=8, key="brazil_sm")
+                sm = _MNUM_MAP[bra_sm_name]
             with filter_col1:
                 regions_all = sorted(real_daily["region"].unique())
                 selected_regions_brazil = st.multiselect(
@@ -1555,13 +1553,13 @@ with tab_brazil:
 
 # ---- CALENDAR-YEAR ORIGINS ----
 with tab_colombia:
-    render_cal_tab("Colombia", today, avg_option, sm)
+    render_cal_tab("Colombia", today, avg_option)
 
 with tab_honduras:
-    render_cal_tab("Honduras", today, avg_option, sm)
+    render_cal_tab("Honduras", today, avg_option)
 
 with tab_super4:
-    render_cal_tab("Super 4", today, avg_option, sm)
+    render_cal_tab("Super 4", today, avg_option)
 
 with tab_vietnam:
-    render_cal_tab("Vietnam", today, avg_option, 4)  # April crop year for Vietnam
+    render_cal_tab("Vietnam", today, avg_option, default_sm=4)
