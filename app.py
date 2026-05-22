@@ -1363,11 +1363,11 @@ today = pd.Timestamp.today().normalize()
 with st.sidebar:
     st.markdown(
         f"<p style='font-size:.65rem;font-weight:700;letter-spacing:.14em;"
-        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Crop Year Start</p>",
+        f"text-transform:uppercase;color:{INK_3};margin-bottom:.4rem'>Start Month</p>",
         unsafe_allow_html=True,
     )
     crop_start_name = st.selectbox(
-        "Crop Year Start Month", _MONTH_NAMES_LIST, index=0,   # January default
+        "Start Month", _MONTH_NAMES_LIST, index=3,   # April default
         label_visibility="collapsed",
     )
     sm = _MNUM_MAP[crop_start_name]
