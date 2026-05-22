@@ -1556,7 +1556,7 @@ with tab_colombia:
     render_cal_tab("Colombia", today, avg_option)
 
 with tab_honduras:
-    render_cal_tab("Honduras", today, avg_option)
+    render_cal_tab("Honduras", today, avg_option, default_sm=4)
 
 with tab_super4:
     render_cal_tab("Super 4", today, avg_option)
