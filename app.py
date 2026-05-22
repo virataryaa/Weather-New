@@ -1419,6 +1419,7 @@ tab_brazil, tab_colombia, tab_honduras, tab_super4, tab_vietnam = st.tabs([
 
 # ---- BRAZIL ----
 with tab_brazil:
+    sm = 9  # September crop year for Brazil
     if not st.session_state.get("brazil_loaded", False):
         st.info("Click below to load Brazil weather data.")
         if st.button("Load Brazil Data", key="load_brazil"):
@@ -1563,4 +1564,4 @@ with tab_super4:
     render_cal_tab("Super 4", today, avg_option, sm)
 
 with tab_vietnam:
-    render_cal_tab("Vietnam", today, avg_option, sm)
+    render_cal_tab("Vietnam", today, avg_option, 4)  # April crop year for Vietnam
