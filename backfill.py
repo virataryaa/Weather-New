@@ -22,12 +22,16 @@ PARQUET_DIR = Path(__file__).parent / "data"
 API_URL     = "https://api.weatherdesk.xweather.com/2e621a7f-2b1e-4f3e-af6a-5a986a68b398/services/gwi/v1/timeseries"
 MAX_WORKERS = 20
 
-# API keys to pull — "normals" is the API's own key for climate normals
+# API keys to pull — "normals" is the API's own key for climate normals.
+# Default window for every origin; an origin can override it with a "years" key.
 FETCH_YEARS = [
     "2016", "2017", "2018", "2019", "2020",
     "2021", "2022", "2023", "2024", "2025", "2026",
     "normals",
 ]
+
+# Vietnam carries two extra years of history (API has data back to 1981)
+VIETNAM_YEARS = ["2014", "2015"] + FETCH_YEARS
 
 # -------------------------------------------------------
 # ORIGINS
@@ -90,6 +94,7 @@ ORIGINS = {
     },
     "Vietnam": {
         "file": "vietnam.parquet",
+        "years": VIETNAM_YEARS,
         "stations": {
             "48875": "Vietnam", "48866": "Vietnam", "48900": "Vietnam",
         },
@@ -99,7 +104,7 @@ ORIGINS = {
 # -------------------------------------------------------
 # FETCH
 # -------------------------------------------------------
-def _fetch_station(station: str, parameter: str) -> list:
+def _fetch_station(station: str, parameter: str, years: list) -> list:
     """Fetch one station / parameter. Returns list of row dicts."""
     params = {
         "station": station, "parameter": parameter,
@@ -110,7 +115,7 @@ def _fetch_station(station: str, parameter: str) -> list:
     data = r.json().get("output", {})
 
     records = []
-    for api_year in FETCH_YEARS:
+    for api_year in years:
         if api_year not in data:
             continue
         # Rename API "normals" key to the display label used in parquet
@@ -135,12 +140,13 @@ def _fetch_origin(origin_name: str, cfg: dict) -> pd.DataFrame:
     from functools import reduce
     station_region = cfg["stations"]
     stations       = list(station_region.keys())
+    years          = cfg.get("years", FETCH_YEARS)
     buckets        = {"PRCP": [], "TAVG": [], "TMIN": [], "TMAX": []}
     errors         = []
 
     tasks = [(s, p) for s in stations for p in buckets]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(_fetch_station, s, p): (s, p) for s, p in tasks}
+        futures = {ex.submit(_fetch_station, s, p, years): (s, p) for s, p in tasks}
         for fut in as_completed(futures):
             stn, param = futures[fut]
             try:
@@ -173,7 +179,8 @@ def main():
 
     for origin_name, cfg in ORIGINS.items():
         n_stations = len(cfg["stations"])
-        print(f"[{origin_name}]  {n_stations} stations × 2 params × {len(FETCH_YEARS)} years ...")
+        n_years = len(cfg.get("years", FETCH_YEARS))
+        print(f"[{origin_name}]  {n_stations} stations × 4 params × {n_years} years ...")
         df = _fetch_origin(origin_name, cfg)
         if df.empty:
             print(f"  No data returned — skipping.\n")

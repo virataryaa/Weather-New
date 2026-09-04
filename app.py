@@ -26,7 +26,8 @@ ALL_YEAR_COLORS = {
     "2026": RED,        "2025": INK,        "2024": "#2980b9",
     "2023": "#27ae60",  "2022": "#8e44ad",  "2021": "#e67e22",
     "2020": "#16a085",  "2019": "#d35400",  "2018": "#7f8c8d",
-    "2017": "#2c3e50",  "2016": "#a93226",
+    "2017": "#2c3e50",  "2016": "#a93226",  "2015": "#1f618d",
+    "2014": "#117864",
     "Normal (Maxar)": INK_4,
 }
 
@@ -69,7 +70,7 @@ FILE_MAP = {
     "Vietnam":  "vietnam.parquet",
 }
 
-ALL_CAL_YEARS = [str(y) for y in range(2016, 2027)] + ["Normal (Maxar)"]
+ALL_CAL_YEARS = [str(y) for y in range(2014, 2027)] + ["Normal (Maxar)"]
 
 # -------------------------------------------------------
 # DATA LOADING
@@ -99,8 +100,11 @@ def crop_label(dt, sm):
 def _cy_sort_key(cy, sm):
     return int(cy) if sm == 1 else int(cy.split("/")[1])
 
-def _min_cy(sm):
-    return "2016" if sm == 1 else "15/16"
+def _min_cy(sm, min_year=2016):
+    """Earliest crop year to keep — driven by the earliest calendar year present."""
+    if sm == 1:
+        return str(min_year)
+    return f"{(min_year - 1) % 100:02d}/{min_year % 100:02d}"
 
 def crop_xdate(dt, sm):
     return pd.Timestamp(2000 if dt.month >= sm else 2001, dt.month, dt.day)
@@ -145,7 +149,7 @@ def process_prcp(raw: pd.DataFrame, today: pd.Timestamp, sm: int):
     )
     real_daily["cumulative_prcp"] = real_daily.groupby(
         ["region", "crop_year"])["prcp_avg"].cumsum()
-    real_daily = real_daily[real_daily["crop_year"] >= _min_cy(sm)].copy()
+    real_daily = real_daily[real_daily["crop_year"] >= _min_cy(sm, int(df_real["year_int"].min()))].copy()
 
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
     df_normals["day"]   = df_normals["date"].str[3:].astype(int)
@@ -189,7 +193,7 @@ def process_temp(raw: pd.DataFrame, today: pd.Timestamp, sm: int):
     )
     for col in ["tmin_avg", "tmax_avg"]:
         if col not in real_daily.columns: real_daily[col] = pd.NA
-    real_daily = real_daily[real_daily["crop_year"] >= _min_cy(sm)].copy()
+    real_daily = real_daily[real_daily["crop_year"] >= _min_cy(sm, int(df_real["year_int"].min()))].copy()
 
     df_normals["month"] = df_normals["date"].str[:2].astype(int)
     df_normals["day"]   = df_normals["date"].str[3:].astype(int)
