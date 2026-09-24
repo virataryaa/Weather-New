@@ -54,6 +54,28 @@ st.markdown(f"""
       color: {INK_3}; border-bottom: 1px solid {BORDER};
       padding-bottom: .5rem; margin: 2rem 0 0.2rem 0;
   }}
+  h1, h2, h3, h4, h5, h6 {{ color: #0a2463 !important; }}
+
+  /* Pill / segmented-control tabs */
+  .stTabs [data-baseweb="tab-list"] {{ background:#eef0f6; padding:4px; border-radius:999px; gap:4px; display:inline-flex; width:fit-content; max-width:100%; }}
+  .stTabs [data-baseweb="tab"] {{ background:transparent !important; color:#5a6688 !important; border-radius:999px !important;
+      padding:8px 20px !important; font-weight:600; border:none !important; margin:0 !important; height:auto !important; }}
+  .stTabs [data-baseweb="tab"] p, .stTabs [data-baseweb="tab"] span {{ font-size:0.85rem !important; font-weight:600 !important; color:inherit !important; }}
+  .stTabs [aria-selected="true"] {{ background:#0a2463 !important; color:#ffffff !important; }}
+  .stTabs [data-baseweb="tab-highlight"] {{ display:none !important; }}
+  .stTabs [data-baseweb="tab-border"] {{ display:none !important; }}
+
+  /* Radio as pill / segmented control */
+  div[role="radiogroup"] {{ background:#eef0f6; padding:4px; border-radius:999px; gap:2px; display:inline-flex; flex-wrap:wrap; }}
+  div[role="radiogroup"] label {{ background:transparent !important; border-radius:999px !important; padding:4px 12px !important; margin:0 !important; }}
+  div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {{ display:none; }}
+  div[role="radiogroup"] label div[data-testid="stMarkdownContainer"] p {{ font-size:12px !important; color:#5a6688 !important; }}
+  div[role="radiogroup"] label:has(input:checked) {{ background:#0a2463 !important; }}
+  div[role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] p {{ color:#ffffff !important; font-weight:600; }}
+
+  /* Sidebar title (hero) */
+  .sb-title {{ font-family:'Fraunces', Georgia, serif; font-size:1.5rem; font-weight:600; color:#0a2463 !important; margin-bottom:2px; }}
+  .sb-caption {{ font-size:11px; color:#7a86a8 !important; margin-bottom:16px; line-height:1.4; }}
 </style>
 """, unsafe_allow_html=True)
 
